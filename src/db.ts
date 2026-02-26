@@ -448,10 +448,17 @@ export function readChannelMessages(
 
 export function cleanupChannelMemberships(): void {
   const db = getDb();
+  // Only remove memberships for sessions that have been inactive for over 24 hours.
+  // This prevents memberships from being lost during brief session restarts.
   db.prepare(`
     DELETE FROM channel_members
     WHERE session_name NOT IN (
       SELECT friendly_name FROM sessions WHERE is_active = 1
+    )
+    AND session_name NOT IN (
+      SELECT friendly_name FROM sessions
+      WHERE is_active = 0
+        AND last_seen_at > datetime('now', '-24 hours')
     )
   `).run();
 }
