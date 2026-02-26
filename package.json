@@ -1,5 +1,5 @@
 {
-  "name": "ccrouter",
+  "name": "@johnmion/ccrouter",
   "version": "1.0.0",
   "description": "Cross-session communication for Claude Code - lets multiple sessions discover each other, exchange messages, and read transcripts",
   "type": "module",

@@ -36,7 +36,7 @@ When you run multiple Claude Code sessions (e.g. one per project), CCRouter give
 ## Installation
 
 ```bash
-npx ccrouter setup
+npx @johnmion/ccrouter setup
 ```
 
 This single command will:
@@ -104,7 +104,7 @@ All runtime data lives in `~/.ccrouter/`:
 ## Uninstall
 
 ```bash
-npx ccrouter uninstall
+npx @johnmion/ccrouter uninstall
 ```
 
 This removes the daemon, MCP config, hooks, permissions, and the terminal bridge extension. The SQLite database (`~/.ccrouter/ccrouter.db`) is preserved. Run `rm -rf ~/.ccrouter` to remove everything.
