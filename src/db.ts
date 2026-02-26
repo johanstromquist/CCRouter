@@ -351,6 +351,15 @@ export function getPendingInvites(sessionName: string): ChannelInvite[] {
     .all(sessionName) as ChannelInvite[];
 }
 
+export function getInvite(channelName: string, toSession: string): ChannelInvite | undefined {
+  const db = getDb();
+  return db
+    .prepare(
+      "SELECT * FROM channel_invites WHERE channel_name = ? AND to_session = ? AND status = 'pending'"
+    )
+    .get(channelName, toSession) as ChannelInvite | undefined;
+}
+
 export function acceptInvite(channelName: string, sessionName: string): boolean {
   const db = getDb();
   const result = db

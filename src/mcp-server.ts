@@ -16,6 +16,7 @@ import {
   getChannelsForSession,
   isChannelMember,
   createInvite,
+  getInvite,
   getPendingInvites,
   acceptInvite,
   declineInvite,
@@ -311,6 +312,12 @@ server.tool(
 // Channel tools
 // =====================================================================
 
+/** Ensure channel name starts with # */
+function normalizeChannel(name: string): string {
+  return name.startsWith("#") ? name : `#${name}`;
+}
+
+
 // --- invite_to_channel ---
 server.tool(
   "invite_to_channel",
@@ -318,12 +325,12 @@ server.tool(
   {
     channel: z
       .string()
-      .regex(/^#[a-z0-9-]+$/)
-      .describe('Channel name (must start with #, e.g. "#deploy")'),
+      .describe('Channel name (e.g. "#deploy")'),
     target_name: z.string().describe("Friendly name of the session to invite"),
   },
   async (params) => {
     const { name } = ensureRegistered();
+    const channel = normalizeChannel(params.channel);
 
     const target = resolveSession(params.target_name);
     if (!target) {
@@ -346,15 +353,15 @@ server.tool(
     }
 
     // Auto-join the inviter to the channel
-    joinChannel(params.channel, name);
+    joinChannel(channel, name);
 
     // Create the invite
-    createInvite(params.channel, name, target.friendly_name);
+    createInvite(channel, name, target.friendly_name);
 
     // Push-deliver the invitation
     let pushStatus = "";
     if (target.tty) {
-      const prompt = `[CCRouter] ${name} invited you to channel ${params.channel}. Use accept_invite to join.`;
+      const prompt = `[CCRouter] ${name} invited you to channel ${channel}. Use accept_invite to join.`;
       const result = await pushToTerminal(target.tty, prompt);
       pushStatus = result?.ok
         ? " (pushed to terminal)"
@@ -367,7 +374,7 @@ server.tool(
       content: [
         {
           type: "text" as const,
-          text: `Invited "${target.friendly_name}" to ${params.channel}${pushStatus}`,
+          text: `Invited "${target.friendly_name}" to ${channel}${pushStatus}`,
         },
       ],
     };
@@ -379,32 +386,49 @@ server.tool(
   "accept_invite",
   "Accept a pending channel invitation and join the channel",
   {
-    channel: z.string().describe("Channel name to accept invite for"),
+    channel: z.string().describe('Channel name to accept invite for (e.g. "#deploy")'),
   },
   async (params) => {
     const { name } = ensureRegistered();
+    const channel = normalizeChannel(params.channel);
 
-    const accepted = acceptInvite(params.channel, name);
+    // Look up the invite before accepting (to get inviter info)
+    const invite = getInvite(channel, name);
+
+    const accepted = acceptInvite(channel, name);
     if (!accepted) {
       return {
         content: [
           {
             type: "text" as const,
-            text: `No pending invitation for channel "${params.channel}".`,
+            text: `No pending invitation for channel "${channel}".`,
           },
         ],
       };
     }
 
-    joinChannel(params.channel, name);
-    const members = getChannelMembers(params.channel);
-    const memberNames = members.map((m) => m.session_name).join(", ");
+    // Get existing members before joining (these are who we notify)
+    const existingMembers = getChannelMembers(channel);
+
+    joinChannel(channel, name);
+    const allMembers = getChannelMembers(channel);
+    const memberNames = allMembers.map((m) => m.session_name).join(", ");
+
+    // Notify existing channel members that someone joined
+    for (const member of existingMembers) {
+      if (member.session_name === name) continue;
+      const session = resolveSession(member.session_name);
+      if (session?.tty) {
+        const prompt = `[${channel}] ${name} joined the channel.`;
+        await pushToTerminal(session.tty, prompt);
+      }
+    }
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Joined ${params.channel}. Members: ${memberNames}`,
+          text: `Joined ${channel}. Members: ${memberNames}`,
         },
       ],
     };
@@ -416,28 +440,41 @@ server.tool(
   "decline_invite",
   "Decline a pending channel invitation",
   {
-    channel: z.string().describe("Channel name to decline invite for"),
+    channel: z.string().describe('Channel name to decline invite for (e.g. "#deploy")'),
   },
   async (params) => {
     const { name } = ensureRegistered();
+    const channel = normalizeChannel(params.channel);
 
-    const declined = declineInvite(params.channel, name);
+    // Look up the invite before declining (to get inviter info)
+    const invite = getInvite(channel, name);
+
+    const declined = declineInvite(channel, name);
     if (!declined) {
       return {
         content: [
           {
             type: "text" as const,
-            text: `No pending invitation for channel "${params.channel}".`,
+            text: `No pending invitation for channel "${channel}".`,
           },
         ],
       };
+    }
+
+    // Notify the inviter that the invite was declined
+    if (invite) {
+      const inviter = resolveSession(invite.from_session);
+      if (inviter?.tty) {
+        const prompt = `[${channel}] ${name} declined the invitation.`;
+        await pushToTerminal(inviter.tty, prompt);
+      }
     }
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Declined invitation to ${params.channel}.`,
+          text: `Declined invitation to ${channel}.`,
         },
       ],
     };
@@ -449,34 +486,35 @@ server.tool(
   "send_message",
   "Send a message to all members of a channel (you must be a member)",
   {
-    channel: z.string().describe("Channel to send message to"),
+    channel: z.string().describe('Channel to send message to (e.g. "#deploy")'),
     message: z.string().describe("Message content"),
   },
   async (params) => {
     const { name } = ensureRegistered();
+    const channel = normalizeChannel(params.channel);
 
-    if (!isChannelMember(params.channel, name)) {
+    if (!isChannelMember(channel, name)) {
       return {
         content: [
           {
             type: "text" as const,
-            text: `You are not a member of ${params.channel}. Join via accept_invite first.`,
+            text: `You are not a member of ${channel}. Join via accept_invite first.`,
           },
         ],
       };
     }
 
-    const msg = sendChannelMessage(name, params.channel, params.message);
+    const msg = sendChannelMessage(name, channel, params.message);
 
     // Push to all other members' terminals
-    const members = getChannelMembers(params.channel);
+    const members = getChannelMembers(channel);
     const otherMembers = members.filter((m) => m.session_name !== name);
     let pushed = 0;
 
     for (const member of otherMembers) {
       const session = resolveSession(member.session_name);
       if (session?.tty) {
-        const prompt = `[${params.channel}] ${name}: ${params.message}`;
+        const prompt = `[${channel}] ${name}: ${params.message}`;
         const result = await pushToTerminal(session.tty, prompt);
         if (result?.ok) pushed++;
       }
@@ -491,7 +529,7 @@ server.tool(
       content: [
         {
           type: "text" as const,
-          text: `Message sent to ${params.channel} (id: ${msg.id})${pushStatus}`,
+          text: `Message sent to ${channel} (id: ${msg.id})${pushStatus}`,
         },
       ],
     };
@@ -506,7 +544,7 @@ server.tool(
     channel: z
       .string()
       .optional()
-      .describe("Specific channel to read from (omit for all channels)"),
+      .describe('Specific channel to read from, e.g. "#deploy" (omit for all channels)'),
     include_read: z
       .boolean()
       .optional()
@@ -518,17 +556,18 @@ server.tool(
 
     let channels: string[];
     if (params.channel) {
-      if (!isChannelMember(params.channel, name)) {
+      const channel = normalizeChannel(params.channel);
+      if (!isChannelMember(channel, name)) {
         return {
           content: [
             {
               type: "text" as const,
-              text: `You are not a member of ${params.channel}.`,
+              text: `You are not a member of ${channel}.`,
             },
           ],
         };
       }
-      channels = [params.channel];
+      channels = [channel];
     } else {
       const memberships = getChannelsForSession(name);
       channels = memberships.map((m) => m.channel_name);
@@ -566,24 +605,34 @@ server.tool(
   "leave_channel",
   "Leave a channel. The channel dissolves when all members leave.",
   {
-    channel: z.string().describe("Channel name to leave"),
+    channel: z.string().describe('Channel name to leave (e.g. "#deploy")'),
   },
   async (params) => {
     const { name } = ensureRegistered();
+    const channel = normalizeChannel(params.channel);
 
-    if (!isChannelMember(params.channel, name)) {
+    if (!isChannelMember(channel, name)) {
       return {
         content: [
           {
             type: "text" as const,
-            text: `You are not a member of ${params.channel}.`,
+            text: `You are not a member of ${channel}.`,
           },
         ],
       };
     }
 
-    leaveChannel(params.channel, name);
-    const remaining = getChannelMembers(params.channel);
+    leaveChannel(channel, name);
+    const remaining = getChannelMembers(channel);
+
+    // Notify remaining members
+    for (const member of remaining) {
+      const session = resolveSession(member.session_name);
+      if (session?.tty) {
+        const prompt = `[${channel}] ${name} left the channel.`;
+        await pushToTerminal(session.tty, prompt);
+      }
+    }
 
     let dissolution = "";
     if (remaining.length === 0) {
@@ -594,7 +643,7 @@ server.tool(
       content: [
         {
           type: "text" as const,
-          text: `Left ${params.channel}.${dissolution}`,
+          text: `Left ${channel}.${dissolution}`,
         },
       ],
     };
