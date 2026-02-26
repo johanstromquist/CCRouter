@@ -1,14 +1,38 @@
 {
   "name": "ccrouter",
   "version": "1.0.0",
-  "description": "Claude Code Session Router - MCP server for inter-session discovery and messaging",
+  "description": "Cross-session communication for Claude Code - lets multiple sessions discover each other, exchange messages, and read transcripts",
   "type": "module",
   "main": "dist/mcp-server.js",
+  "bin": {
+    "ccrouter": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "data/",
+    "hooks/",
+    "cursor-extension/*.vsix",
+    "cursor-extension/extension.js",
+    "cursor-extension/package.json"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "build:vsix": "cd cursor-extension && npx -y @vscode/vsce package --allow-missing-repository",
+    "prepublishOnly": "npm run build:vsix && npm run build",
     "start:daemon": "node dist/daemon.js",
     "start:mcp": "node dist/mcp-server.js"
+  },
+  "keywords": [
+    "claude-code",
+    "mcp",
+    "multi-agent",
+    "session-router"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johanstromquist/CCRouter.git"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

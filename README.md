@@ -36,18 +36,19 @@ When you run multiple Claude Code sessions (e.g. one per project), CCRouter give
 ## Installation
 
 ```bash
-git clone https://github.com/johanstromquist/CCRouter.git
-cd CCRouter
-npm install
-./install.sh
+npx ccrouter setup
 ```
 
-The installer will:
+This single command will:
 
-1. Build the TypeScript source
+1. Copy CCRouter to `~/.ccrouter/app/` and install dependencies
 2. Register the MCP server with Claude Code (`claude mcp add`)
 3. Configure SessionStart/SessionEnd hooks in `~/.claude/settings.json`
-4. Install and start the daemon via `launchd`
+4. Add auto-allow permissions for CCRouter MCP tools
+5. Install and start the daemon via `launchd`
+6. Auto-detect VS Code/Cursor and install the terminal bridge extension
+
+The terminal bridge extension is required for message delivery -- it pushes messages directly into the target session's terminal via VS Code's `sendSequence` API. Without it, messages are stored but the recipient has no way to see them.
 
 ### Verify
 
@@ -55,22 +56,17 @@ The installer will:
 curl http://127.0.0.1:19919/health
 ```
 
-### Terminal bridge extension (required for message delivery)
+### From source
 
-The VS Code/Cursor extension is what actually delivers messages into terminal sessions. Without it, `send_message` stores messages in SQLite but the recipient has no way to see them unless they manually call `read_messages`. The extension pushes messages directly into the target session's terminal via VS Code's `sendSequence` API.
+If you prefer to install from a git clone:
 
 ```bash
-cd cursor-extension
-npx @vscode/vsce package --allow-missing-repository
-
-# For Cursor:
-cursor --install-extension ccrouter-terminal-bridge-1.0.0.vsix
-
-# For VS Code:
-code --install-extension ccrouter-terminal-bridge-1.0.0.vsix
+git clone https://github.com/johanstromquist/CCRouter.git
+cd CCRouter
+npm install
+npm run build
+node dist/cli.js setup
 ```
-
-The extension starts automatically per editor window and registers itself on a dynamic port. The MCP server discovers active bridges via registry files in `~/.ccrouter/bridges/`.
 
 ## Usage
 
@@ -93,7 +89,7 @@ From any session, use the MCP tools:
 
 1. **Registration** -- On SessionStart, a hook script walks the process tree to find the session's TTY, then POSTs to the daemon to register
 2. **Identity** -- The MCP server identifies itself by matching its process tree's TTY against registered sessions in the SQLite database
-3. **Messaging** -- Messages are stored in SQLite. If the Cursor extension is running, messages are also pushed directly into the target terminal via `sendSequence`
+3. **Messaging** -- Messages are stored in SQLite. If the terminal bridge extension is running, messages are also pushed directly into the target terminal via `sendSequence`
 4. **Cleanup** -- The daemon periodically checks for dead PIDs and marks their sessions inactive
 
 ### Data storage
@@ -101,20 +97,17 @@ From any session, use the MCP tools:
 All runtime data lives in `~/.ccrouter/`:
 
 - `ccrouter.db` -- SQLite database (sessions + messages)
-- `bridges/` -- Bridge registry files (one per Cursor window)
+- `app/` -- Installed CCRouter package (source, dependencies, extension)
+- `bridges/` -- Bridge registry files (one per VS Code/Cursor window)
 - `hook-debug.log` -- Debug log from session hooks
 
 ## Uninstall
 
 ```bash
-# Stop the daemon
-launchctl bootout gui/$(id -u)/com.ccrouter.daemon
-
-# Remove MCP server
-claude mcp remove ccrouter
-
-# Remove hooks from ~/.claude/settings.json (SessionStart and SessionEnd entries)
+npx ccrouter uninstall
 ```
+
+This removes the daemon, MCP config, hooks, permissions, and the terminal bridge extension. The SQLite database (`~/.ccrouter/ccrouter.db`) is preserved. Run `rm -rf ~/.ccrouter` to remove everything.
 
 ## License
 
