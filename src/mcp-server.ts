@@ -484,9 +484,10 @@ server.tool(
 // --- send_message ---
 server.tool(
   "send_message",
-  "Send a message to all members of a channel (you must be a member)",
+  "Send a message to a specific member or all members of a channel. Both sender and target must be members of the channel.",
   {
-    channel: z.string().describe('Channel to send message to (e.g. "#deploy")'),
+    channel: z.string().describe('Channel context (e.g. "#deploy")'),
+    to: z.string().optional().describe("Target session name. Omit to broadcast to all channel members."),
     message: z.string().describe("Message content"),
   },
   async (params) => {
@@ -504,14 +505,30 @@ server.tool(
       };
     }
 
+    // If targeting a specific member, verify they're in the channel
+    if (params.to) {
+      if (!isChannelMember(channel, params.to)) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `"${params.to}" is not a member of ${channel}.`,
+            },
+          ],
+        };
+      }
+    }
+
     const msg = sendChannelMessage(name, channel, params.message);
 
-    // Push to all other members' terminals
+    // Determine recipients
     const members = getChannelMembers(channel);
-    const otherMembers = members.filter((m) => m.session_name !== name);
+    const targets = params.to
+      ? members.filter((m) => m.session_name === params.to)
+      : members.filter((m) => m.session_name !== name);
     let pushed = 0;
 
-    for (const member of otherMembers) {
+    for (const member of targets) {
       const session = resolveSession(member.session_name);
       if (session?.tty) {
         const prompt = `[${channel}] ${name}: ${params.message}`;
@@ -520,16 +537,19 @@ server.tool(
       }
     }
 
+    const target = params.to ? params.to : "all";
     const pushStatus =
-      otherMembers.length > 0
-        ? ` (pushed to ${pushed}/${otherMembers.length} members)`
-        : " (no other members in channel)";
+      targets.length > 0
+        ? ` (pushed to ${pushed}/${targets.length})`
+        : params.to
+          ? ` (${params.to} not reachable)`
+          : " (no other members in channel)";
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Message sent to ${channel} (id: ${msg.id})${pushStatus}`,
+          text: `Message sent to ${target} in ${channel} (id: ${msg.id})${pushStatus}`,
         },
       ],
     };
