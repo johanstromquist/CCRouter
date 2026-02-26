@@ -15,10 +15,25 @@ export interface Session {
 export interface Message {
   id: number;
   from_session: string; // friendly_name of sender
-  to_session: string; // friendly_name, session_id, or "*"
+  channel: string; // channel name (e.g. "#deploy")
   content: string;
   created_at: string;
   read_at: string | null;
+}
+
+export interface ChannelMember {
+  channel_name: string;
+  session_name: string; // friendly_name of the session
+  joined_at: string;
+}
+
+export interface ChannelInvite {
+  id: number;
+  channel_name: string;
+  from_session: string; // friendly_name of inviter
+  to_session: string; // friendly_name of target
+  created_at: string;
+  status: "pending" | "accepted" | "declined";
 }
 
 export interface RegisterRequest {

@@ -6,12 +6,21 @@ import {
   registerSession,
   getActiveSessions,
   resolveSession,
-  sendMessage,
-  readMessages,
   updateSessionName,
   touchSession,
   getSessionById,
   getDb,
+  joinChannel,
+  leaveChannel,
+  getChannelMembers,
+  getChannelsForSession,
+  isChannelMember,
+  createInvite,
+  getPendingInvites,
+  acceptInvite,
+  declineInvite,
+  sendChannelMessage,
+  readChannelMessages,
 } from "./db.js";
 import { readTranscript, formatTranscript } from "./transcript.js";
 import { pushToTerminal } from "./bridge.js";
@@ -76,7 +85,7 @@ function ensureRegistered(): { id: string; name: string } {
 
 const server = new McpServer({
   name: "ccrouter",
-  version: "1.0.0",
+  version: "2.0.0",
 });
 
 // --- register_self: fallback if hook didn't set env var ---
@@ -118,6 +127,7 @@ server.tool(
     try {
       const { id, name } = ensureRegistered();
       const session = getSessionById(id);
+      const channels = getChannelsForSession(name);
       return {
         content: [
           {
@@ -128,6 +138,7 @@ server.tool(
                 session_id: id,
                 cwd: session?.cwd,
                 registered_at: session?.registered_at,
+                channels: channels.map((c) => c.channel_name),
               },
               null,
               2
@@ -151,7 +162,7 @@ server.tool(
 // --- list_sessions ---
 server.tool(
   "list_sessions",
-  "List all active Claude Code sessions",
+  "List all active Claude Code sessions (for discovery -- use invite_to_channel to communicate)",
   {},
   async () => {
     const sessions = getActiveSessions();
@@ -198,127 +209,6 @@ server.tool(
           text: JSON.stringify(session, null, 2),
         },
       ],
-    };
-  }
-);
-
-// --- send_message ---
-server.tool(
-  "send_message",
-  'Send a message to another session by name, or "*" to broadcast',
-  {
-    to: z
-      .string()
-      .describe('Target session friendly name, session ID, or "*" for broadcast'),
-    message: z.string().describe("Message content"),
-  },
-  async (params) => {
-    const { name } = ensureRegistered();
-
-    // Validate target exists (unless broadcast)
-    if (params.to !== "*") {
-      const target = resolveSession(params.to);
-      if (!target) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Session "${params.to}" not found. Use list_sessions to see active sessions.`,
-            },
-          ],
-        };
-      }
-      // Store message in DB
-      const msg = sendMessage(name, target.friendly_name, params.message);
-
-      // Attempt push delivery via terminal bridge
-      let pushStatus = "";
-      if (target.tty) {
-        const prompt = `[CCRouter message from ${name}]: ${params.message}`;
-        const result = await pushToTerminal(target.tty, prompt);
-        if (result?.ok) {
-          pushStatus = " (pushed to terminal)";
-        } else {
-          pushStatus = " (queued -- bridge unavailable or terminal not found)";
-        }
-      } else {
-        pushStatus = " (queued -- no tty registered for target)";
-      }
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Message sent to "${target.friendly_name}" (id: ${msg.id})${pushStatus}`,
-          },
-        ],
-      };
-    }
-
-    // Broadcast: store message, then push to all sessions with ttys
-    const msg = sendMessage(name, "*", params.message);
-    const sessions = getActiveSessions().filter(
-      (s) => s.session_id !== currentSessionId && s.tty
-    );
-    let pushed = 0;
-    for (const s of sessions) {
-      const prompt = `[CCRouter broadcast from ${name}]: ${params.message}`;
-      const result = await pushToTerminal(s.tty!, prompt);
-      if (result?.ok) pushed++;
-    }
-    const pushStatus =
-      sessions.length > 0
-        ? ` (pushed to ${pushed}/${sessions.length} sessions)`
-        : " (no other sessions to push to)";
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Broadcast message sent (id: ${msg.id})${pushStatus}`,
-        },
-      ],
-    };
-  }
-);
-
-// --- read_messages ---
-server.tool(
-  "read_messages",
-  "Read messages sent to this session",
-  {
-    include_read: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe("Include already-read messages"),
-  },
-  async (params) => {
-    const { id, name } = ensureRegistered();
-    const messages = readMessages(name, id, !params.include_read);
-
-    if (messages.length === 0) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: params.include_read
-              ? "No messages found."
-              : "No unread messages.",
-          },
-        ],
-      };
-    }
-
-    const formatted = messages
-      .map(
-        (m) =>
-          `[${m.created_at}] From ${m.from_session}: ${m.content}`
-      )
-      .join("\n\n");
-
-    return {
-      content: [{ type: "text" as const, text: formatted }],
     };
   }
 );
@@ -413,6 +303,367 @@ server.tool(
           text: `Transcript for "${session.friendly_name}" (last ${messages.length} messages):\n\n${formatTranscript(messages)}`,
         },
       ],
+    };
+  }
+);
+
+// =====================================================================
+// Channel tools
+// =====================================================================
+
+// --- invite_to_channel ---
+server.tool(
+  "invite_to_channel",
+  "Invite another session to a channel. The channel materializes when the invite is accepted. You auto-join when you invite.",
+  {
+    channel: z
+      .string()
+      .regex(/^#[a-z0-9-]+$/)
+      .describe('Channel name (must start with #, e.g. "#deploy")'),
+    target_name: z.string().describe("Friendly name of the session to invite"),
+  },
+  async (params) => {
+    const { name } = ensureRegistered();
+
+    const target = resolveSession(params.target_name);
+    if (!target) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Session "${params.target_name}" not found. Use list_sessions to see active sessions.`,
+          },
+        ],
+      };
+    }
+
+    if (target.friendly_name === name) {
+      return {
+        content: [
+          { type: "text" as const, text: "You cannot invite yourself." },
+        ],
+      };
+    }
+
+    // Auto-join the inviter to the channel
+    joinChannel(params.channel, name);
+
+    // Create the invite
+    createInvite(params.channel, name, target.friendly_name);
+
+    // Push-deliver the invitation
+    let pushStatus = "";
+    if (target.tty) {
+      const prompt = `[CCRouter] ${name} invited you to channel ${params.channel}. Use accept_invite to join.`;
+      const result = await pushToTerminal(target.tty, prompt);
+      pushStatus = result?.ok
+        ? " (pushed to terminal)"
+        : " (queued -- bridge unavailable)";
+    } else {
+      pushStatus = " (queued -- no tty)";
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Invited "${target.friendly_name}" to ${params.channel}${pushStatus}`,
+        },
+      ],
+    };
+  }
+);
+
+// --- accept_invite ---
+server.tool(
+  "accept_invite",
+  "Accept a pending channel invitation and join the channel",
+  {
+    channel: z.string().describe("Channel name to accept invite for"),
+  },
+  async (params) => {
+    const { name } = ensureRegistered();
+
+    const accepted = acceptInvite(params.channel, name);
+    if (!accepted) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No pending invitation for channel "${params.channel}".`,
+          },
+        ],
+      };
+    }
+
+    joinChannel(params.channel, name);
+    const members = getChannelMembers(params.channel);
+    const memberNames = members.map((m) => m.session_name).join(", ");
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Joined ${params.channel}. Members: ${memberNames}`,
+        },
+      ],
+    };
+  }
+);
+
+// --- decline_invite ---
+server.tool(
+  "decline_invite",
+  "Decline a pending channel invitation",
+  {
+    channel: z.string().describe("Channel name to decline invite for"),
+  },
+  async (params) => {
+    const { name } = ensureRegistered();
+
+    const declined = declineInvite(params.channel, name);
+    if (!declined) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No pending invitation for channel "${params.channel}".`,
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Declined invitation to ${params.channel}.`,
+        },
+      ],
+    };
+  }
+);
+
+// --- send_message ---
+server.tool(
+  "send_message",
+  "Send a message to all members of a channel (you must be a member)",
+  {
+    channel: z.string().describe("Channel to send message to"),
+    message: z.string().describe("Message content"),
+  },
+  async (params) => {
+    const { name } = ensureRegistered();
+
+    if (!isChannelMember(params.channel, name)) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `You are not a member of ${params.channel}. Join via accept_invite first.`,
+          },
+        ],
+      };
+    }
+
+    const msg = sendChannelMessage(name, params.channel, params.message);
+
+    // Push to all other members' terminals
+    const members = getChannelMembers(params.channel);
+    const otherMembers = members.filter((m) => m.session_name !== name);
+    let pushed = 0;
+
+    for (const member of otherMembers) {
+      const session = resolveSession(member.session_name);
+      if (session?.tty) {
+        const prompt = `[${params.channel}] ${name}: ${params.message}`;
+        const result = await pushToTerminal(session.tty, prompt);
+        if (result?.ok) pushed++;
+      }
+    }
+
+    const pushStatus =
+      otherMembers.length > 0
+        ? ` (pushed to ${pushed}/${otherMembers.length} members)`
+        : " (no other members in channel)";
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Message sent to ${params.channel} (id: ${msg.id})${pushStatus}`,
+        },
+      ],
+    };
+  }
+);
+
+// --- read_messages ---
+server.tool(
+  "read_messages",
+  "Read messages from channels you are a member of",
+  {
+    channel: z
+      .string()
+      .optional()
+      .describe("Specific channel to read from (omit for all channels)"),
+    include_read: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Include already-read messages"),
+  },
+  async (params) => {
+    const { name } = ensureRegistered();
+
+    let channels: string[];
+    if (params.channel) {
+      if (!isChannelMember(params.channel, name)) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `You are not a member of ${params.channel}.`,
+            },
+          ],
+        };
+      }
+      channels = [params.channel];
+    } else {
+      const memberships = getChannelsForSession(name);
+      channels = memberships.map((m) => m.channel_name);
+    }
+
+    const messages = readChannelMessages(name, channels, !params.include_read);
+
+    if (messages.length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: params.include_read
+              ? "No messages found."
+              : "No unread messages.",
+          },
+        ],
+      };
+    }
+
+    const formatted = messages
+      .map(
+        (m) => `[${m.created_at}] [${m.channel}] ${m.from_session}: ${m.content}`
+      )
+      .join("\n\n");
+
+    return {
+      content: [{ type: "text" as const, text: formatted }],
+    };
+  }
+);
+
+// --- leave_channel ---
+server.tool(
+  "leave_channel",
+  "Leave a channel. The channel dissolves when all members leave.",
+  {
+    channel: z.string().describe("Channel name to leave"),
+  },
+  async (params) => {
+    const { name } = ensureRegistered();
+
+    if (!isChannelMember(params.channel, name)) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `You are not a member of ${params.channel}.`,
+          },
+        ],
+      };
+    }
+
+    leaveChannel(params.channel, name);
+    const remaining = getChannelMembers(params.channel);
+
+    let dissolution = "";
+    if (remaining.length === 0) {
+      dissolution = " Channel dissolved (no remaining members).";
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Left ${params.channel}.${dissolution}`,
+        },
+      ],
+    };
+  }
+);
+
+// --- list_channels ---
+server.tool(
+  "list_channels",
+  "List channels you are a member of and their members",
+  {},
+  async () => {
+    const { name } = ensureRegistered();
+
+    const memberships = getChannelsForSession(name);
+    if (memberships.length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "You are not a member of any channels.",
+          },
+        ],
+      };
+    }
+
+    const lines: string[] = [];
+    for (const m of memberships) {
+      const members = getChannelMembers(m.channel_name);
+      const memberNames = members
+        .map((cm) =>
+          cm.session_name === name
+            ? `${cm.session_name} (you)`
+            : cm.session_name
+        )
+        .join(", ");
+      lines.push(`${m.channel_name}: ${memberNames}`);
+    }
+
+    return {
+      content: [{ type: "text" as const, text: lines.join("\n") }],
+    };
+  }
+);
+
+// --- list_invites ---
+server.tool(
+  "list_invites",
+  "List pending channel invitations for this session",
+  {},
+  async () => {
+    const { name } = ensureRegistered();
+
+    const invites = getPendingInvites(name);
+    if (invites.length === 0) {
+      return {
+        content: [
+          { type: "text" as const, text: "No pending invitations." },
+        ],
+      };
+    }
+
+    const lines = invites.map(
+      (inv) =>
+        `${inv.channel_name} -- invited by ${inv.from_session} (${inv.created_at})`
+    );
+
+    return {
+      content: [{ type: "text" as const, text: lines.join("\n") }],
     };
   }
 );

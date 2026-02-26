@@ -7,6 +7,7 @@ import {
   markSessionInactive,
   touchSession,
   getDb,
+  cleanupChannelMemberships,
 } from "./db.js";
 import { scanLockFiles, isProcessAlive } from "./lock-scanner.js";
 import type { RegisterRequest, Session } from "./types.js";
@@ -163,6 +164,7 @@ function main() {
   setInterval(() => {
     try {
       cleanupStaleSessions();
+      cleanupChannelMemberships();
       syncLockFiles();
     } catch (err) {
       console.error("[poll] Error during cleanup:", err);
