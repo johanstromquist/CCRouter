@@ -1,0 +1,32 @@
+{
+  "name": "ccrouter-terminal-bridge",
+  "displayName": "CCRouter Terminal Bridge",
+  "description": "Enables CCRouter to send messages to Claude Code terminal sessions",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "CCRouter Terminal Bridge",
+      "properties": {
+        "ccrouter.enterPauseMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 0,
+          "maximum": 30000,
+          "description": "Milliseconds to wait after pasting a message before sending Enter. Increase if messages get stuck in terminals. Set to 0 to send Enter immediately."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "ccrouter.sendToTerminal",
+        "title": "CCRouter: Send to Terminal"
+      }
+    ]
+  }
+}

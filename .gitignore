@@ -1,0 +1,23 @@
+# Build output
+dist/
+
+# Dependencies
+node_modules/
+
+# Runtime artifacts
+logs/
+
+# Local Claude Code settings
+.claude/
+
+# Cursor extension build artifacts
+cursor-extension/*.vsix
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

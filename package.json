@@ -1,0 +1,24 @@
+{
+  "name": "ccrouter",
+  "version": "1.0.0",
+  "description": "Claude Code Session Router - MCP server for inter-session discovery and messaging",
+  "type": "module",
+  "main": "dist/mcp-server.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start:daemon": "node dist/daemon.js",
+    "start:mcp": "node dist/mcp-server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^11.8.2",
+    "ws": "^8.19.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.13.5",
+    "typescript": "^5.7.3"
+  }
+}
