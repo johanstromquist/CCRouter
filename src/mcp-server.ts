@@ -226,8 +226,8 @@ server.tool(
   },
   async (params) => {
     const { id } = ensureRegistered();
-    const ok = updateSessionName(id, params.name);
-    if (ok) {
+    const result = updateSessionName(id, params.name);
+    if (result === true) {
       currentSessionName = params.name;
       return {
         content: [
@@ -235,12 +235,13 @@ server.tool(
         ],
       };
     }
+    const reason =
+      result === "reserved"
+        ? `Name "${params.name}" is reserved by a recently active session. Choose another.`
+        : `Name "${params.name}" is already taken. Choose another.`;
     return {
       content: [
-        {
-          type: "text" as const,
-          text: `Name "${params.name}" is already taken. Choose another.`,
-        },
+        { type: "text" as const, text: reason },
       ],
     };
   }

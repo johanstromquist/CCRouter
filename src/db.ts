@@ -144,12 +144,13 @@ export function registerSession(opts: {
         .get(opts.session_id) as Session;
     }
 
-    // Re-identification: if an active session exists with the same cwd and a dead
-    // PID, this is likely the same project reconnecting after an IDE/terminal
-    // restart. Transfer its friendly name so the user sees a consistent identity.
+    // Re-identification: if a session exists with the same cwd (active with dead
+    // PID, or recently inactive), this is likely the same project reconnecting
+    // after a restart. Transfer its friendly name and channel memberships.
     let friendlyName: string | null = null;
     if (opts.cwd) {
-      const predecessor = db
+      // First try active sessions with dead PIDs
+      let predecessor = db
         .prepare(
           `SELECT * FROM sessions
            WHERE cwd = ? AND is_active = 1 AND session_id != ?
@@ -163,8 +164,31 @@ export function registerSession(opts: {
           "UPDATE sessions SET is_active = 0, friendly_name = friendly_name || '-old' WHERE session_id = ?"
         ).run(predecessor.session_id);
         console.log(
-          `[db] Re-identified: transferring name "${friendlyName}" from ${predecessor.session_id} to ${opts.session_id}`
+          `[db] Re-identified (active predecessor): transferring name "${friendlyName}" from ${predecessor.session_id} to ${opts.session_id}`
         );
+      }
+
+      // If no active predecessor, check recently inactive sessions (within 24h)
+      if (!friendlyName) {
+        predecessor = db
+          .prepare(
+            `SELECT * FROM sessions
+             WHERE cwd = ? AND is_active = 0 AND session_id != ?
+               AND last_seen_at > datetime('now', '-24 hours')
+               AND friendly_name NOT LIKE '%-old'
+             ORDER BY last_seen_at DESC LIMIT 1`
+          )
+          .get(opts.cwd, opts.session_id) as Session | undefined;
+
+        if (predecessor) {
+          friendlyName = predecessor.friendly_name;
+          db.prepare(
+            "UPDATE sessions SET friendly_name = friendly_name || '-old' WHERE session_id = ?"
+          ).run(predecessor.session_id);
+          console.log(
+            `[db] Re-identified (inactive predecessor): transferring name "${friendlyName}" from ${predecessor.session_id} to ${opts.session_id}`
+          );
+        }
       }
     }
 
@@ -239,8 +263,32 @@ export function resolveSession(nameOrId: string): Session | undefined {
 export function updateSessionName(
   sessionId: string,
   newName: string
-): boolean {
+): string | true {
   const db = getDb();
+
+  // Check if the name is taken by another active session
+  const activeTaken = db
+    .prepare(
+      "SELECT session_id FROM sessions WHERE friendly_name = ? AND is_active = 1 AND session_id != ?"
+    )
+    .get(newName, sessionId) as { session_id: string } | undefined;
+  if (activeTaken) {
+    return "taken";
+  }
+
+  // Check if the name belongs to a recently inactive session (24h grace period)
+  const inactiveTaken = db
+    .prepare(
+      `SELECT session_id FROM sessions
+       WHERE friendly_name = ? AND is_active = 0 AND session_id != ?
+         AND last_seen_at > datetime('now', '-24 hours')
+         AND friendly_name NOT LIKE '%-old'`
+    )
+    .get(newName, sessionId) as { session_id: string } | undefined;
+  if (inactiveTaken) {
+    return "reserved";
+  }
+
   try {
     const old = db
       .prepare("SELECT friendly_name FROM sessions WHERE session_id = ?")
@@ -255,7 +303,7 @@ export function updateSessionName(
     }
     return true;
   } catch {
-    return false; // Unique constraint violation
+    return "taken";
   }
 }
 
