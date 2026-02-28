@@ -13,6 +13,7 @@ Channels work like World of Warcraft chat channels -- they materialize when memb
 - **Daemon** -- HTTP server on `127.0.0.1:19919` that maintains a session registry and cleans up stale sessions
 - **MCP server** -- Provides tools to Claude Code for session discovery, channel management, and messaging
 - **Hooks** -- SessionStart/SessionEnd hooks that auto-register and deregister sessions with the daemon
+- **Status line** -- Shows the session's friendly name in the Claude Code footer bar
 - **Terminal bridge extension** -- VS Code/Cursor extension that delivers messages directly into terminal sessions via `sendSequence`
 
 ### MCP tools
@@ -42,7 +43,7 @@ Channels work like World of Warcraft chat channels -- they materialize when memb
 
 | Tool | Description |
 |------|-------------|
-| `send_message` | Send a message to a channel (must be a member) |
+| `send_message` | Send a message to a channel, optionally targeting a specific member |
 | `read_messages` | Read messages from your channels |
 | `leave_channel` | Leave a channel (dissolves when empty) |
 
@@ -65,8 +66,9 @@ This single command will:
 2. Register the MCP server with Claude Code (`claude mcp add`)
 3. Configure SessionStart/SessionEnd hooks in `~/.claude/settings.json`
 4. Add auto-allow permissions for CCRouter MCP tools
-5. Install and start the daemon via `launchd`
-6. Auto-detect VS Code/Cursor and install the terminal bridge extension
+5. Configure the status line to show session names in the Claude Code footer
+6. Install and start the daemon via `launchd`
+7. Auto-detect VS Code/Cursor and install the terminal bridge extension
 
 The terminal bridge extension is required for message delivery -- it pushes messages directly into the target session's terminal via VS Code's `sendSequence` API. Without it, messages are stored but the recipient has no way to see them.
 
@@ -112,11 +114,11 @@ The invited sessions receive a push notification and accept:
 > accept the invite to #deploy-sprint
 ```
 
-All communication is then scoped to channel members:
+All communication is then scoped to channel members. Use the `to` parameter for targeted messages, or omit it to broadcast:
 
 ```
-> send "phase 1 complete, starting phase 2" to #deploy-sprint
-> read messages from #deploy-sprint
+> send "phase 1 complete" to bold-bat in #deploy-sprint
+> send "starting phase 2" to #deploy-sprint
 ```
 
 When the work is done, agents leave and the channel dissolves:
@@ -129,9 +131,10 @@ When the work is done, agents leave and the channel dissolves:
 
 1. **Registration** -- On SessionStart, a hook script walks the process tree to find the session's TTY, then POSTs to the daemon to register
 2. **Identity** -- The MCP server identifies itself by matching its process tree's TTY against registered sessions in the SQLite database
-3. **Channels** -- Agents form channels via invite/accept. Messages are scoped to channels -- no direct messaging or broadcasting outside of channels
-4. **Messaging** -- Messages are stored in SQLite and pushed to channel members' terminals via the bridge extension
-5. **Cleanup** -- The daemon periodically checks for dead PIDs, marks sessions inactive, and removes stale channel memberships
+3. **Name persistence** -- When a session restarts in the same terminal or working directory, it inherits its previous friendly name and channel memberships. Custom names set via `set_session_name` are preserved across restarts
+4. **Channels** -- Agents form channels via invite/accept. Messages are scoped to channels -- no direct messaging or broadcasting outside of channels
+5. **Messaging** -- Messages are stored in SQLite and pushed to channel members' terminals via the bridge extension. Messages can target a specific member or broadcast to all channel members
+6. **Cleanup** -- The daemon periodically checks for dead PIDs, marks sessions inactive, and removes stale channel memberships
 
 ### Data storage
 
