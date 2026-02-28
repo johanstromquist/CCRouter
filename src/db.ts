@@ -170,9 +170,11 @@ export function registerSession(opts: {
 
       if (predecessor && predecessor.pid && !isProcessAlive(predecessor.pid)) {
         friendlyName = predecessor.friendly_name;
-        db.prepare(
-          "UPDATE sessions SET is_active = 0, friendly_name = friendly_name || '-old' WHERE session_id = ?"
-        ).run(predecessor.session_id);
+        // Delete the predecessor to avoid friendly_name unique constraint
+        // collisions from repeated '-old' renames
+        db.prepare("DELETE FROM sessions WHERE session_id = ?").run(
+          predecessor.session_id
+        );
         console.log(
           `[db] Re-identified (active predecessor): transferring name "${friendlyName}" from ${predecessor.session_id} to ${opts.session_id}`
         );
@@ -185,16 +187,17 @@ export function registerSession(opts: {
             `SELECT * FROM sessions
              WHERE cwd = ? AND is_active = 0 AND session_id != ?
                AND last_seen_at > datetime('now', '-24 hours')
-               AND friendly_name NOT LIKE '%-old'
-             ORDER BY last_seen_at DESC LIMIT 1`
+               ORDER BY last_seen_at DESC LIMIT 1`
           )
           .get(opts.cwd, opts.session_id) as Session | undefined;
 
         if (predecessor) {
           friendlyName = predecessor.friendly_name;
-          db.prepare(
-            "UPDATE sessions SET friendly_name = friendly_name || '-old' WHERE session_id = ?"
-          ).run(predecessor.session_id);
+          // Delete the predecessor to avoid friendly_name unique constraint
+          // collisions from repeated '-old' renames
+          db.prepare("DELETE FROM sessions WHERE session_id = ?").run(
+            predecessor.session_id
+          );
           console.log(
             `[db] Re-identified (inactive predecessor): transferring name "${friendlyName}" from ${predecessor.session_id} to ${opts.session_id}`
           );
