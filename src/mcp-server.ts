@@ -58,23 +58,17 @@ function findSessionByProcessTree(): Session | undefined {
 }
 
 function ensureRegistered(): { id: string; name: string } {
-  if (currentSessionId && currentSessionName) {
-    touchSession(currentSessionId);
-    return { id: currentSessionId, name: currentSessionName };
-  }
   if (currentSessionId) {
     const s = getSessionById(currentSessionId);
     if (s) {
-      currentSessionName = s.friendly_name;
       touchSession(currentSessionId);
-      return { id: currentSessionId, name: currentSessionName };
+      return { id: currentSessionId, name: s.friendly_name };
     }
   }
   // Fallback: find session by walking the process tree to match tty
   const s = findSessionByProcessTree();
   if (s) {
     currentSessionId = s.session_id;
-    currentSessionName = s.friendly_name;
     touchSession(s.session_id);
     return { id: s.session_id, name: s.friendly_name };
   }

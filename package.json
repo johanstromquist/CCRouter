@@ -1,6 +1,6 @@
 {
   "name": "@johnmion/ccrouter",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Cross-session communication for Claude Code - lets multiple sessions discover each other, exchange messages, and read transcripts",
   "type": "module",
   "main": "dist/mcp-server.js",
