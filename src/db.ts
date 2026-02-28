@@ -107,13 +107,23 @@ export function registerSession(opts: {
   const result = db.transaction(() => {
     const now = new Date().toISOString();
 
-    // Deactivate any other session that had this tty (tty was reassigned).
-    // This runs FIRST, before the existence check, so even reactivations
-    // clean up stale entries with the same tty.
+    // Check if there's already an active session on this tty.
+    // If so, reuse it rather than creating a new one -- this handles the
+    // case where hooks fire with different session_ids for the same terminal.
     if (opts.tty) {
-      db.prepare(
-        "UPDATE sessions SET is_active = 0 WHERE tty = ? AND session_id != ?"
-      ).run(opts.tty, opts.session_id);
+      const ttySession = db
+        .prepare(
+          "SELECT * FROM sessions WHERE tty = ? AND is_active = 1 AND session_id != ?"
+        )
+        .get(opts.tty, opts.session_id) as Session | undefined;
+
+      if (ttySession) {
+        // Same tty, different session_id -- reuse the existing session
+        db.prepare(
+          "UPDATE sessions SET last_seen_at = ?, pid = COALESCE(?, pid), cwd = COALESCE(?, cwd) WHERE session_id = ?"
+        ).run(new Date().toISOString(), opts.pid ?? null, opts.cwd ?? null, ttySession.session_id);
+        return ttySession;
+      }
     }
 
     // Check if session already exists
