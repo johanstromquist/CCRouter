@@ -161,11 +161,31 @@ server.tool(
   {},
   async () => {
     const sessions = getActiveSessions();
+
+    // Build set of channels the calling session belongs to
+    const me = currentSessionId
+      ? getSessionById(currentSessionId)
+      : findSessionByProcessTree();
+    const myChannels = me
+      ? new Set(getChannelsForSession(me.friendly_name).map((m) => m.channel_name))
+      : new Set<string>();
+
     const lines = sessions.map((s) => {
       const marker = s.session_id === currentSessionId ? " (you)" : "";
       const cwd = s.cwd ? ` | cwd: ${s.cwd}` : "";
       const ide = s.ide_name ? ` | ide: ${s.ide_name}` : "";
-      return `${s.friendly_name}${marker}${cwd}${ide}`;
+
+      // Find shared channels with this session
+      let shared = "";
+      if (myChannels.size > 0 && s.session_id !== currentSessionId) {
+        const theirChannels = getChannelsForSession(s.friendly_name).map((m) => m.channel_name);
+        const overlap = theirChannels.filter((ch) => myChannels.has(ch));
+        if (overlap.length > 0) {
+          shared = ` | shared: ${overlap.join(", ")}`;
+        }
+      }
+
+      return `${s.friendly_name}${marker}${cwd}${ide}${shared}`;
     });
     return {
       content: [
