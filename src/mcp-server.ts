@@ -22,6 +22,7 @@ import {
   declineInvite,
   sendChannelMessage,
   readChannelMessages,
+  createPendingAck,
 } from "./db.js";
 import { readTranscript, formatTranscript } from "./transcript.js";
 import { pushToTerminal } from "./bridge.js";
@@ -499,7 +500,7 @@ server.tool(
 // --- send_message ---
 server.tool(
   "send_message",
-  "Send a message to a specific member or all members of a channel. Both sender and target must be members of the channel.",
+  "Send a message to a specific member or all members of a channel. Both sender and target must be members of the channel. Messages are pushed to terminals and automatically acknowledged -- if no ack is received within 30s, the system retries (first Enter, then a nudge). You will be notified if delivery ultimately fails.",
   {
     channel: z.string().describe('Channel context (e.g. "#deploy")'),
     to: z.string().optional().describe("Target session name. Omit to broadcast to all channel members."),
@@ -548,7 +549,10 @@ server.tool(
       if (session?.tty) {
         const prompt = `[${channel}] ${name}: ${params.message}`;
         const result = await pushToTerminal(session.tty, prompt);
-        if (result?.ok) pushed++;
+        if (result?.ok) {
+          pushed++;
+          createPendingAck(msg.id, channel, name, member.session_name, session.tty);
+        }
       }
     }
 

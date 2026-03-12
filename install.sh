@@ -17,27 +17,28 @@ echo "Project dir: $CCROUTER_DIR"
 echo ""
 
 # 1. Build
-echo "[1/6] Building TypeScript..."
+echo "[1/7] Building TypeScript..."
 cd "$CCROUTER_DIR"
 npm run build
 echo "  Build complete."
 
 # 2. Make hooks executable
-echo "[2/6] Setting hook permissions..."
+echo "[2/7] Setting hook permissions..."
 chmod +x "$CCROUTER_DIR/hooks/session-start.sh"
 chmod +x "$CCROUTER_DIR/hooks/session-end.sh"
 chmod +x "$CCROUTER_DIR/hooks/statusline.sh"
+chmod +x "$CCROUTER_DIR/hooks/ack-message.sh"
 echo "  Done."
 
 # 3. Wire MCP config via claude CLI
-echo "[3/6] Configuring MCP server..."
+echo "[3/7] Configuring MCP server..."
 # Remove existing ccrouter entry if present, then add fresh
 claude mcp remove ccrouter 2>/dev/null || true
 claude mcp add --transport stdio --scope user ccrouter -- node "$CCROUTER_DIR/dist/mcp-server.js"
 echo "  Done."
 
 # 4. Wire hooks into settings.json
-echo "[4/6] Configuring hooks..."
+echo "[4/7] Configuring hooks..."
 if [ ! -f "$SETTINGS_JSON" ]; then
   echo '{}' > "$SETTINGS_JSON"
 fi
@@ -67,6 +68,14 @@ settings['hooks']['SessionEnd'] = [{
     }]
 }]
 
+settings['hooks']['UserPromptSubmit'] = [{
+    'hooks': [{
+        'type': 'command',
+        'command': '$CCROUTER_DIR/hooks/ack-message.sh',
+        'async': True
+    }]
+}]
+
 settings['statusLine'] = {
     'type': 'command',
     'command': '$CCROUTER_DIR/hooks/statusline.sh'
@@ -76,18 +85,20 @@ with open('$SETTINGS_JSON', 'w') as f:
     json.dump(settings, f, indent=2)
     f.write('\n')
 
-print('  Added SessionStart and SessionEnd hooks + statusLine to settings.json')
+print('  Added SessionStart, SessionEnd, UserPromptSubmit hooks + statusLine to settings.json')
 "
 
 # 5. Install statusline to app directory
-echo "[5/6] Installing statusline..."
+echo "[5/7] Installing hooks to app directory..."
 mkdir -p "$HOME/.ccrouter/app/hooks"
 cp "$CCROUTER_DIR/hooks/statusline.sh" "$HOME/.ccrouter/app/hooks/statusline.sh"
+cp "$CCROUTER_DIR/hooks/ack-message.sh" "$HOME/.ccrouter/app/hooks/ack-message.sh"
 chmod +x "$HOME/.ccrouter/app/hooks/statusline.sh"
+chmod +x "$HOME/.ccrouter/app/hooks/ack-message.sh"
 echo "  Done."
 
 # 6. Install launchd plist
-echo "[6/6] Installing launchd daemon..."
+echo "[6/7] Installing launchd daemon..."
 mkdir -p "$CCROUTER_DIR/logs"
 mkdir -p "$PLIST_DIR"
 
@@ -135,6 +146,14 @@ fi
 
 launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
 echo "  Daemon installed and started."
+
+# 7. Copy dist to app directory
+echo "[7/7] Deploying to app directory..."
+cp "$CCROUTER_DIR"/dist/*.js "$HOME/.ccrouter/app/dist/" 2>/dev/null || {
+  mkdir -p "$HOME/.ccrouter/app/dist"
+  cp "$CCROUTER_DIR"/dist/*.js "$HOME/.ccrouter/app/dist/"
+}
+echo "  Done."
 
 echo ""
 echo "=== Installation Complete ==="

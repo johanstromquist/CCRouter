@@ -85,6 +85,22 @@ export function getDb(): Database.Database {
 
     CREATE INDEX IF NOT EXISTS idx_channel_members_session ON channel_members(session_name);
     CREATE INDEX IF NOT EXISTS idx_channel_invites_to ON channel_invites(to_session, status);
+
+    CREATE TABLE IF NOT EXISTS pending_acks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id INTEGER NOT NULL,
+      channel TEXT NOT NULL,
+      sender_name TEXT NOT NULL,
+      target_name TEXT NOT NULL,
+      target_tty TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      acked_at TEXT,
+      retry_count INTEGER DEFAULT 0,
+      failed INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pending_acks_unacked
+      ON pending_acks(acked_at, failed, created_at);
   `);
 
   return _db;
@@ -154,52 +170,83 @@ export function registerSession(opts: {
         .get(opts.session_id) as Session;
     }
 
-    // Re-identification: if a session exists with the same cwd (active with dead
-    // PID, or recently inactive), this is likely the same project reconnecting
-    // after a restart. Transfer its friendly name and channel memberships.
+    // Re-identification: match by tty first (unique per terminal), then
+    // fall back to cwd. TTY is the reliable anchor -- if a session restarts
+    // in the same terminal, it should always get the same name back.
     let friendlyName: string | null = null;
-    if (opts.cwd) {
-      // First try active sessions with dead PIDs
-      let predecessor = db
+
+    // 1. TTY match (most reliable -- same terminal = same session)
+    if (!friendlyName && opts.tty) {
+      // Check inactive sessions on this tty
+      const ttyPredecessor = db
+        .prepare(
+          `SELECT * FROM sessions
+           WHERE tty = ? AND is_active = 0 AND session_id != ?
+           ORDER BY last_seen_at DESC LIMIT 1`
+        )
+        .get(opts.tty, opts.session_id) as Session | undefined;
+
+      if (ttyPredecessor) {
+        friendlyName = ttyPredecessor.friendly_name;
+        db.prepare("DELETE FROM sessions WHERE session_id = ?").run(
+          ttyPredecessor.session_id
+        );
+        console.log(
+          `[db] Re-identified (tty match): transferring name "${friendlyName}" from ${ttyPredecessor.session_id} to ${opts.session_id}`
+        );
+      }
+    }
+
+    // 2. CWD match (fallback -- clean up stale sessions, inherit name)
+    if (!friendlyName && opts.cwd) {
+      // Clean up active sessions in this cwd with dead PIDs
+      const activeSameCwd = db
         .prepare(
           `SELECT * FROM sessions
            WHERE cwd = ? AND is_active = 1 AND session_id != ?
-           ORDER BY last_seen_at DESC LIMIT 1`
+           ORDER BY last_seen_at DESC`
         )
-        .get(opts.cwd, opts.session_id) as Session | undefined;
+        .all(opts.cwd, opts.session_id) as Session[];
 
-      if (predecessor && predecessor.pid && !isProcessAlive(predecessor.pid)) {
-        friendlyName = predecessor.friendly_name;
-        // Delete the predecessor to avoid friendly_name unique constraint
-        // collisions from repeated '-old' renames
-        db.prepare("DELETE FROM sessions WHERE session_id = ?").run(
-          predecessor.session_id
-        );
-        console.log(
-          `[db] Re-identified (active predecessor): transferring name "${friendlyName}" from ${predecessor.session_id} to ${opts.session_id}`
-        );
+      for (const candidate of activeSameCwd) {
+        if (candidate.pid && !isProcessAlive(candidate.pid)) {
+          if (!friendlyName) {
+            friendlyName = candidate.friendly_name;
+            console.log(
+              `[db] Re-identified (cwd match, dead pid): transferring name "${friendlyName}" from ${candidate.session_id} to ${opts.session_id}`
+            );
+          }
+          db.prepare("DELETE FROM sessions WHERE session_id = ?").run(
+            candidate.session_id
+          );
+        }
       }
 
-      // If no active predecessor, check recently inactive sessions (within 24h)
+      // Check recently inactive sessions by cwd.
+      // Only inherit if there's exactly one candidate -- if multiple inactive
+      // sessions share this cwd, we can't know which name belongs to this
+      // terminal, so skip and assign a new name.
       if (!friendlyName) {
-        predecessor = db
+        const candidates = db
           .prepare(
             `SELECT * FROM sessions
              WHERE cwd = ? AND is_active = 0 AND session_id != ?
                AND last_seen_at > datetime('now', '-24 hours')
-               ORDER BY last_seen_at DESC LIMIT 1`
+               ORDER BY last_seen_at DESC`
           )
-          .get(opts.cwd, opts.session_id) as Session | undefined;
+          .all(opts.cwd, opts.session_id) as Session[];
 
-        if (predecessor) {
-          friendlyName = predecessor.friendly_name;
-          // Delete the predecessor to avoid friendly_name unique constraint
-          // collisions from repeated '-old' renames
+        if (candidates.length === 1) {
+          friendlyName = candidates[0].friendly_name;
           db.prepare("DELETE FROM sessions WHERE session_id = ?").run(
-            predecessor.session_id
+            candidates[0].session_id
           );
           console.log(
-            `[db] Re-identified (inactive predecessor): transferring name "${friendlyName}" from ${predecessor.session_id} to ${opts.session_id}`
+            `[db] Re-identified (cwd match, inactive): transferring name "${friendlyName}" from ${candidates[0].session_id} to ${opts.session_id}`
+          );
+        } else if (candidates.length > 1) {
+          console.log(
+            `[db] Ambiguous cwd match for ${opts.cwd}: ${candidates.length} inactive candidates, skipping re-identification`
           );
         }
       }
@@ -503,6 +550,87 @@ export function readChannelMessages(
   }
 
   return messages;
+}
+
+// --- Pending acks (message delivery tracking) ---
+
+export interface PendingAck {
+  id: number;
+  message_id: number;
+  channel: string;
+  sender_name: string;
+  target_name: string;
+  target_tty: string;
+  created_at: string;
+  acked_at: string | null;
+  retry_count: number;
+  failed: number;
+}
+
+export function createPendingAck(
+  messageId: number,
+  channel: string,
+  senderName: string,
+  targetName: string,
+  targetTty: string
+): void {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO pending_acks (message_id, channel, sender_name, target_name, target_tty, created_at, retry_count, failed)
+     VALUES (?, ?, ?, ?, ?, ?, 0, 0)`
+  ).run(messageId, channel, senderName, targetName, targetTty, new Date().toISOString());
+}
+
+export function ackMessage(channel: string, senderName: string, targetTty: string): boolean {
+  const db = getDb();
+  const pending = db
+    .prepare(
+      `SELECT id FROM pending_acks
+       WHERE channel = ? AND sender_name = ? AND target_tty = ?
+         AND acked_at IS NULL AND failed = 0
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(channel, senderName, targetTty) as { id: number } | undefined;
+
+  if (!pending) return false;
+
+  db.prepare("UPDATE pending_acks SET acked_at = ? WHERE id = ?").run(
+    new Date().toISOString(),
+    pending.id
+  );
+  return true;
+}
+
+export function getUnackedMessages(olderThanSeconds: number): PendingAck[] {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT * FROM pending_acks
+       WHERE acked_at IS NULL AND failed = 0
+         AND created_at < datetime('now', '-' || ? || ' seconds')
+       ORDER BY created_at`
+    )
+    .all(olderThanSeconds) as PendingAck[];
+}
+
+export function incrementRetry(id: number): void {
+  const db = getDb();
+  db.prepare("UPDATE pending_acks SET retry_count = retry_count + 1 WHERE id = ?").run(id);
+}
+
+export function markAckFailed(id: number): void {
+  const db = getDb();
+  db.prepare("UPDATE pending_acks SET failed = 1 WHERE id = ?").run(id);
+}
+
+export function cleanupOldAcks(): void {
+  const db = getDb();
+  // Remove acked or failed entries older than 1 hour
+  db.prepare(
+    `DELETE FROM pending_acks
+     WHERE (acked_at IS NOT NULL OR failed = 1)
+       AND created_at < datetime('now', '-1 hour')`
+  ).run();
 }
 
 // --- Cleanup ---

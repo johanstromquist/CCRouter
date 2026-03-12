@@ -12,8 +12,9 @@ Channels work like World of Warcraft chat channels -- they materialize when memb
 
 - **Daemon** -- HTTP server on `127.0.0.1:19919` that maintains a session registry and cleans up stale sessions
 - **MCP server** -- Provides tools to Claude Code for session discovery, channel management, and messaging
-- **Hooks** -- SessionStart/SessionEnd hooks that auto-register and deregister sessions with the daemon
-- **Status line** -- Shows the session's friendly name in the Claude Code footer bar
+- **Hooks** -- SessionStart/SessionEnd hooks for auto-registration, UserPromptSubmit hook for message acknowledgment
+- **Status line** -- Shows the session's friendly name and last-response timestamp in the Claude Code footer bar
+- **Delivery tracking** -- Automatic ack/retry system ensures messages are received. Retries with Enter, then a nudge, then notifies the sender on failure
 - **Terminal bridge extension** -- VS Code/Cursor extension that delivers messages directly into terminal sessions via `sendSequence`
 
 ### MCP tools
@@ -43,7 +44,7 @@ Channels work like World of Warcraft chat channels -- they materialize when memb
 
 | Tool | Description |
 |------|-------------|
-| `send_message` | Send a message to a channel, optionally targeting a specific member |
+| `send_message` | Send a message to a channel with automatic delivery tracking (ack/retry) |
 | `read_messages` | Read messages from your channels |
 | `leave_channel` | Leave a channel (dissolves when empty) |
 
@@ -66,8 +67,9 @@ This single command will:
 2. Register the MCP server with Claude Code (`claude mcp add`)
 3. Configure SessionStart/SessionEnd hooks in `~/.claude/settings.json`
 4. Add auto-allow permissions for CCRouter MCP tools
-5. Configure the status line to show session names in the Claude Code footer
-6. Install and start the daemon via `launchd`
+5. Configure the status line to show session names and timestamps in the Claude Code footer
+6. Configure the UserPromptSubmit hook for automatic message acknowledgment
+7. Install and start the daemon via `launchd`
 7. Auto-detect VS Code/Cursor and install the terminal bridge extension
 
 The terminal bridge extension is required for message delivery -- it pushes messages directly into the target session's terminal via VS Code's `sendSequence` API. Without it, messages are stored but the recipient has no way to see them.
@@ -134,7 +136,8 @@ When the work is done, agents leave and the channel dissolves:
 3. **Name persistence** -- When a session restarts in the same terminal or working directory, it inherits its previous friendly name and channel memberships. Custom names set via `set_session_name` are preserved across restarts
 4. **Channels** -- Agents form channels via invite/accept. Messages are scoped to channels -- no direct messaging or broadcasting outside of channels
 5. **Messaging** -- Messages are stored in SQLite and pushed to channel members' terminals via the bridge extension. Messages can target a specific member or broadcast to all channel members
-6. **Cleanup** -- The daemon periodically checks for dead PIDs, marks sessions inactive, and removes stale channel memberships
+6. **Delivery tracking** -- Each pushed message is tracked in a `pending_acks` table. When the recipient's UserPromptSubmit hook fires, it sends an ack to the daemon. If no ack arrives within 30 seconds, the daemon retries: first by sending Enter (in case the message is stuck in the terminal buffer), then by sending "Did you receive my recent message?". If still unacked, the sender is notified that delivery failed
+7. **Cleanup** -- The daemon periodically checks for dead PIDs, marks sessions inactive, removes stale channel memberships, and cleans up old ack records
 
 ### Data storage
 

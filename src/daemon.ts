@@ -8,7 +8,14 @@ import {
   touchSession,
   getDb,
   cleanupChannelMemberships,
+  ackMessage,
+  getUnackedMessages,
+  incrementRetry,
+  markAckFailed,
+  cleanupOldAcks,
+  resolveSession,
 } from "./db.js";
+import { pushToTerminal } from "./bridge.js";
 import { scanLockFiles, isProcessAlive } from "./lock-scanner.js";
 import type { RegisterRequest, Session } from "./types.js";
 
@@ -66,6 +73,20 @@ function handleHealth(_req: IncomingMessage, res: ServerResponse) {
   });
 }
 
+async function handleAck(req: IncomingMessage, res: ServerResponse) {
+  const body = JSON.parse(await readBody(req)) as {
+    channel: string;
+    sender: string;
+    tty: string;
+  };
+  if (!body.channel || !body.sender || !body.tty) {
+    json(res, 400, { error: "channel, sender, and tty required" });
+    return;
+  }
+  const acked = ackMessage(body.channel, body.sender, body.tty);
+  json(res, 200, { ok: true, acked });
+}
+
 function handleSessionInfo(sessionId: string, res: ServerResponse) {
   const session = getSessionById(sessionId);
   if (!session) {
@@ -107,6 +128,45 @@ function cleanupStaleSessions() {
   }
 }
 
+// --- Message delivery retry ---
+
+async function retryUnackedMessages() {
+  // Check for messages unacked after 30 seconds
+  const unacked = getUnackedMessages(30);
+
+  for (const pending of unacked) {
+    if (pending.retry_count === 0) {
+      // First retry: just send Enter (the original message may be stuck in buffer)
+      console.log(
+        `[retry] Nudging ${pending.target_name} (Enter) for message ${pending.message_id} in ${pending.channel}`
+      );
+      await pushToTerminal(pending.target_tty, "");
+      incrementRetry(pending.id);
+    } else if (pending.retry_count === 1) {
+      // Second retry: send a follow-up question
+      console.log(
+        `[retry] Prodding ${pending.target_name} for message ${pending.message_id} in ${pending.channel}`
+      );
+      const nudge = `[${pending.channel}] ${pending.sender_name}: Did you receive my recent message?`;
+      await pushToTerminal(pending.target_tty, nudge);
+      incrementRetry(pending.id);
+    } else {
+      // Give up and notify sender
+      console.log(
+        `[retry] Delivery failed for message ${pending.message_id} to ${pending.target_name} -- notifying ${pending.sender_name}`
+      );
+      markAckFailed(pending.id);
+
+      // Push failure notification to sender
+      const sender = resolveSession(pending.sender_name);
+      if (sender?.tty) {
+        const notice = `[CCRouter] Message delivery to "${pending.target_name}" in ${pending.channel} was not acknowledged after retries. The agent may be unresponsive.`;
+        await pushToTerminal(sender.tty, notice);
+      }
+    }
+  }
+}
+
 // --- Cross-reference lock files with sessions ---
 
 function syncLockFiles() {
@@ -133,6 +193,8 @@ const httpServer = createServer(async (req, res) => {
       await handleRegister(req, res);
     } else if (req.method === "POST" && url.pathname === "/deregister") {
       await handleDeregister(req, res);
+    } else if (req.method === "POST" && url.pathname === "/ack") {
+      await handleAck(req, res);
     } else if (req.method === "GET" && url.pathname === "/health") {
       handleHealth(req, res);
     } else if (
@@ -160,16 +222,24 @@ function main() {
     console.log(`CCRouter daemon listening on http://127.0.0.1:${PORT}`);
   });
 
-  // Periodic cleanup
+  // Periodic cleanup (30s)
   setInterval(() => {
     try {
       cleanupStaleSessions();
       cleanupChannelMemberships();
       syncLockFiles();
+      cleanupOldAcks();
     } catch (err) {
       console.error("[poll] Error during cleanup:", err);
     }
   }, POLL_INTERVAL);
+
+  // Message delivery retry (10s -- needs faster cadence than cleanup)
+  setInterval(() => {
+    retryUnackedMessages().catch((err) => {
+      console.error("[retry] Error during retry loop:", err);
+    });
+  }, 10_000);
 
   // Run once at startup
   cleanupStaleSessions();

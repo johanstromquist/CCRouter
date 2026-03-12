@@ -35,8 +35,10 @@ fi
 
 NAME=$(sqlite3 "$DB" "SELECT friendly_name FROM sessions WHERE tty='$MY_TTY' AND is_active=1 LIMIT 1;" 2>/dev/null || echo "")
 
+TIMESTAMP=$(date +"%H:%M:%S")
+
 if [ -n "$NAME" ]; then
-  echo "$NAME"
+  echo "$NAME | $TIMESTAMP"
 else
-  echo "CCRouter: unregistered"
+  echo "CCRouter: unregistered | $TIMESTAMP"
 fi
