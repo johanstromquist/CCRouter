@@ -41,6 +41,24 @@ if [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
+# Look up previous session name for this workspace (for re-identification)
+DESIRED_NAME=""
+SESSIONS_DIR="$HOME/.ccrouter/last-sessions"
+if [ -d "$SESSIONS_DIR" ] && [ -n "$CWD" ]; then
+  CWD_HASH=$(echo -n "$CWD" | md5 2>/dev/null || echo -n "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
+  SESSION_FILE="$SESSIONS_DIR/${CWD_HASH}.json"
+  if [ -f "$SESSION_FILE" ]; then
+    DESIRED_NAME=$(python3 -c "
+import json, sys
+try:
+    sessions = json.load(open('$SESSION_FILE'))
+    if sessions and len(sessions) > 0:
+        print(sessions[0].get('friendlyName', ''))
+except: pass
+" 2>/dev/null || echo "")
+  fi
+fi
+
 # Build registration payload
 PAYLOAD=$(python3 -c "
 import json, sys
@@ -48,6 +66,7 @@ d = {'session_id': '$SESSION_ID'}
 if '$CWD': d['cwd'] = '$CWD'
 if '$PID': d['pid'] = int('$PID') if '$PID'.isdigit() else None
 if '$TTY': d['tty'] = '$TTY'
+if '$DESIRED_NAME': d['desired_name'] = '$DESIRED_NAME'
 print(json.dumps(d))
 " 2>/dev/null || echo '{"session_id":"'"$SESSION_ID"'"}')
 

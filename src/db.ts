@@ -120,21 +120,18 @@ export function registerSession(opts: {
   pid?: number;
   tty?: string;
   cwd?: string;
+  desired_name?: string;
   workspace_folders?: string[];
   ide_name?: string;
   lock_port?: number;
 }): Session {
   const db = getDb();
 
-  // Wrap in IMMEDIATE transaction to serialize concurrent registrations.
-  // Without this, two hooks firing simultaneously for the same tty can both
-  // read "no existing session" and both insert, leaving duplicates.
   const result = db.transaction(() => {
     const now = new Date().toISOString();
 
     // Check if there's already an active session on this tty.
-    // If so, reuse it rather than creating a new one -- this handles the
-    // case where hooks fire with different session_ids for the same terminal.
+    // If so, reuse it rather than creating a new one.
     if (opts.tty) {
       const ttySession = db
         .prepare(
@@ -143,21 +140,19 @@ export function registerSession(opts: {
         .get(opts.tty, opts.session_id) as Session | undefined;
 
       if (ttySession) {
-        // Same tty, different session_id -- reuse the existing session
         db.prepare(
           "UPDATE sessions SET last_seen_at = ?, pid = COALESCE(?, pid), cwd = COALESCE(?, cwd) WHERE session_id = ?"
-        ).run(new Date().toISOString(), opts.pid ?? null, opts.cwd ?? null, ttySession.session_id);
+        ).run(now, opts.pid ?? null, opts.cwd ?? null, ttySession.session_id);
         return ttySession;
       }
     }
 
-    // Check if session already exists
+    // Check if session already exists (same session_id reconnecting)
     const existing = db
       .prepare("SELECT * FROM sessions WHERE session_id = ?")
       .get(opts.session_id) as Session | undefined;
 
     if (existing) {
-      // Reactivate
       db.prepare(
         `UPDATE sessions SET is_active = 1, last_seen_at = ?, pid = COALESCE(?, pid),
          tty = COALESCE(?, tty), cwd = COALESCE(?, cwd),
@@ -179,29 +174,60 @@ export function registerSession(opts: {
         .get(opts.session_id) as Session;
     }
 
-    // Re-identification: match by tty first (unique per terminal), then
-    // fall back to cwd. TTY is the reliable anchor -- if a session restarts
-    // in the same terminal, it should always get the same name back.
+    // --- Re-identification: determine friendly name for new session ---
     let friendlyName: string | null = null;
+    let nameIsCustom = false;
 
-    // 1. TTY match (most reliable -- same terminal = same session)
+    // 0. Desired name (highest priority -- hook read from persisted session file)
+    //    Claim if the name is free or held by an inactive session.
+    if (!friendlyName && opts.desired_name) {
+      const activeTaken = db
+        .prepare(
+          "SELECT session_id FROM sessions WHERE friendly_name = ? AND is_active = 1 AND session_id != ?"
+        )
+        .get(opts.desired_name, opts.session_id) as { session_id: string } | undefined;
+
+      if (!activeTaken) {
+        // Delete any inactive session holding this name + transfer channel memberships
+        const inactive = db
+          .prepare(
+            "SELECT session_id FROM sessions WHERE friendly_name = ? AND is_active = 0"
+          )
+          .get(opts.desired_name) as { session_id: string } | undefined;
+        if (inactive) {
+          db.prepare("DELETE FROM sessions WHERE session_id = ?").run(inactive.session_id);
+        }
+        friendlyName = opts.desired_name;
+        nameIsCustom = true;
+        console.log(
+          `[db] Re-identified (desired_name): claiming "${friendlyName}" for ${opts.session_id}`
+        );
+      } else {
+        console.log(
+          `[db] desired_name "${opts.desired_name}" taken by active session ${activeTaken.session_id}, falling through`
+        );
+      }
+    }
+
+    // 1. TTY match (most reliable on Mac -- same terminal = same session)
     if (!friendlyName && opts.tty) {
-      // Check inactive sessions on this tty
-      const ttyPredecessor = db
+      const ttyPredecessors = db
         .prepare(
           `SELECT * FROM sessions
            WHERE tty = ? AND is_active = 0 AND session_id != ?
-           ORDER BY last_seen_at DESC LIMIT 1`
+           ORDER BY name_custom DESC, last_seen_at DESC`
         )
-        .get(opts.tty, opts.session_id) as Session | undefined;
+        .all(opts.tty, opts.session_id) as (Session & { name_custom?: number })[];
 
-      if (ttyPredecessor) {
-        friendlyName = ttyPredecessor.friendly_name;
-        db.prepare("DELETE FROM sessions WHERE session_id = ?").run(
-          ttyPredecessor.session_id
-        );
+      if (ttyPredecessors.length > 0) {
+        const predecessor = ttyPredecessors[0];
+        friendlyName = predecessor.friendly_name;
+        nameIsCustom = !!(predecessor as any).name_custom;
+        for (const pred of ttyPredecessors) {
+          db.prepare("DELETE FROM sessions WHERE session_id = ?").run(pred.session_id);
+        }
         console.log(
-          `[db] Re-identified (tty match): transferring name "${friendlyName}" from ${ttyPredecessor.session_id} to ${opts.session_id}`
+          `[db] Re-identified (tty match): transferring name "${friendlyName}" from ${predecessor.session_id} to ${opts.session_id}`
         );
       }
     }
@@ -232,16 +258,14 @@ export function registerSession(opts: {
       }
 
       // Check recently inactive sessions by cwd.
-      // Only inherit if there's exactly one candidate -- if multiple inactive
-      // sessions share this cwd, we can't know which name belongs to this
-      // terminal, so skip and assign a new name.
+      // Only inherit if exactly one candidate (ambiguous = skip).
       if (!friendlyName) {
         const candidates = db
           .prepare(
             `SELECT * FROM sessions
              WHERE cwd = ? AND is_active = 0 AND session_id != ?
                AND last_seen_at > datetime('now', '-24 hours')
-               ORDER BY last_seen_at DESC`
+               ORDER BY name_custom DESC, last_seen_at DESC`
           )
           .all(opts.cwd, opts.session_id) as Session[];
 
@@ -274,8 +298,8 @@ export function registerSession(opts: {
     }
 
     db.prepare(
-      `INSERT INTO sessions (session_id, friendly_name, pid, tty, cwd, workspace_folders, ide_name, lock_port, registered_at, last_seen_at, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+      `INSERT INTO sessions (session_id, friendly_name, pid, tty, cwd, workspace_folders, ide_name, lock_port, registered_at, last_seen_at, is_active, name_custom)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
     ).run(
       opts.session_id,
       friendlyName,
@@ -286,7 +310,8 @@ export function registerSession(opts: {
       opts.ide_name ?? null,
       opts.lock_port ?? null,
       now,
-      now
+      now,
+      nameIsCustom ? 1 : 0
     );
 
     return db
@@ -345,17 +370,19 @@ export function updateSessionName(
     return "taken";
   }
 
-  // Check if the name belongs to a recently inactive session (24h grace period)
+  // If the name is held by an inactive session, delete it to free the name.
+  // No grace period -- if you want the name and the old session is dead, take it.
   const inactiveTaken = db
     .prepare(
-      `SELECT session_id FROM sessions
-       WHERE friendly_name = ? AND is_active = 0 AND session_id != ?
-         AND last_seen_at > datetime('now', '-24 hours')
-         AND friendly_name NOT LIKE '%-old'`
+      "SELECT session_id, friendly_name FROM sessions WHERE friendly_name = ? AND is_active = 0 AND session_id != ?"
     )
-    .get(newName, sessionId) as { session_id: string } | undefined;
+    .get(newName, sessionId) as { session_id: string; friendly_name: string } | undefined;
   if (inactiveTaken) {
-    return "reserved";
+    // Transfer channel memberships from the dead session before deleting it
+    db.prepare("UPDATE channel_members SET session_name = ? WHERE session_name = ?").run(
+      newName, inactiveTaken.friendly_name
+    );
+    db.prepare("DELETE FROM sessions WHERE session_id = ?").run(inactiveTaken.session_id);
   }
 
   try {
@@ -363,9 +390,9 @@ export function updateSessionName(
       .prepare("SELECT friendly_name FROM sessions WHERE session_id = ?")
       .get(sessionId) as { friendly_name: string } | undefined;
     db.prepare(
-      "UPDATE sessions SET friendly_name = ? WHERE session_id = ?"
+      "UPDATE sessions SET friendly_name = ?, name_custom = 1 WHERE session_id = ?"
     ).run(newName, sessionId);
-    if (old) {
+    if (old && old.friendly_name !== newName) {
       db.prepare("UPDATE channel_members SET session_name = ? WHERE session_name = ?").run(newName, old.friendly_name);
       db.prepare("UPDATE channel_invites SET from_session = ? WHERE from_session = ?").run(newName, old.friendly_name);
       db.prepare("UPDATE channel_invites SET to_session = ? WHERE to_session = ?").run(newName, old.friendly_name);

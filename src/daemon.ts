@@ -161,30 +161,40 @@ function cleanupStaleSessions() {
   const sessions = getActiveSessions();
   const now = Date.now();
 
-  for (const session of sessions) {
-    // 1. Dead PID -- immediate cleanup (local sessions only)
-    // Sessions without a tty may be remote (Windows, SSE) -- their PIDs
-    // are from a different machine and can't be checked locally.
-    // Use heartbeat timeout for those instead.
-    if (session.pid && session.tty && !isProcessAlive(session.pid)) {
-      console.log(
-        `[cleanup] Deactivating "${session.friendly_name}" -- PID ${session.pid} is dead`
-      );
-      markSessionInactive(session.session_id);
-      continue;
-    }
+  const REMOTE_HEARTBEAT_TIMEOUT = 10 * 60 * 1000; // 10 minutes for remote sessions
 
-    // 2. Inactivity timeout -- no heartbeat for 60 minutes AND PID is dead
-    if (session.last_seen_at) {
-      const lastSeen = new Date(session.last_seen_at).getTime();
-      if (now - lastSeen > INACTIVITY_TIMEOUT) {
+  for (const session of sessions) {
+    const isRemote = !session.tty; // No tty = remote/Windows session
+    const lastSeen = session.last_seen_at ? new Date(session.last_seen_at).getTime() : 0;
+    const idleMinutes = Math.round((now - lastSeen) / 60_000);
+
+    if (isRemote) {
+      // Remote sessions: can't PID-check (PID is from a different machine).
+      // Use heartbeat timeout only -- if no touchSession() in 10 minutes, deactivate.
+      if (lastSeen && now - lastSeen > REMOTE_HEARTBEAT_TIMEOUT) {
+        console.log(
+          `[cleanup] Deactivating remote session "${session.friendly_name}" -- no heartbeat for ${idleMinutes} minutes`
+        );
+        markSessionInactive(session.session_id);
+      }
+    } else {
+      // Local sessions: PID check is reliable (same machine).
+      if (session.pid && !isProcessAlive(session.pid)) {
+        console.log(
+          `[cleanup] Deactivating "${session.friendly_name}" -- PID ${session.pid} is dead`
+        );
+        markSessionInactive(session.session_id);
+        continue;
+      }
+
+      // Inactivity timeout for local sessions with dead PIDs
+      if (lastSeen && now - lastSeen > INACTIVITY_TIMEOUT) {
         if (session.pid && !isProcessAlive(session.pid)) {
           console.log(
-            `[cleanup] Deactivating "${session.friendly_name}" -- inactive for ${Math.round((now - lastSeen) / 60_000)} minutes and PID ${session.pid} is dead`
+            `[cleanup] Deactivating "${session.friendly_name}" -- inactive for ${idleMinutes} minutes and PID ${session.pid} is dead`
           );
           markSessionInactive(session.session_id);
         }
-        continue;
       }
     }
   }

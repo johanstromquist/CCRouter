@@ -41,6 +41,7 @@ export interface RegisterRequest {
   pid?: number;
   tty?: string;
   cwd?: string;
+  desired_name?: string;
   workspace_folders?: string[];
   ide_name?: string;
   lock_port?: number;
