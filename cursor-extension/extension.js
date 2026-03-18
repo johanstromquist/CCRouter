@@ -126,8 +126,19 @@ function activate(context) {
     console.error("CCRouter Terminal Bridge error:", err);
   });
 
+  // Re-register with daemon every 60s to survive daemon restarts,
+  // bridge file cleanup, and sleep/wake cycles
+  let heartbeatInterval = null;
+  const startHeartbeat = (port) => {
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
+    heartbeatInterval = setInterval(() => {
+      registerWithDaemon(port);
+    }, 60_000);
+  };
+
   context.subscriptions.push({
     dispose: () => {
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (server) server.close();
       if (registryFile) {
         try {
@@ -135,6 +146,11 @@ function activate(context) {
         } catch {}
       }
     },
+  });
+
+  // Start heartbeat once the server port is known
+  server.on("listening", () => {
+    startHeartbeat(server.address().port);
   });
 }
 

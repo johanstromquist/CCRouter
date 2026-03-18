@@ -139,6 +139,16 @@ server.tool(
     });
     currentSessionId = session.session_id;
     currentSessionName = session.friendly_name;
+
+    // Notify bridges so they can map session_id to terminal
+    notifyBridges({
+      tty: session.tty || params.tty,
+      session_id: session.session_id,
+      friendly_name: session.friendly_name,
+      cwd: session.cwd || params.cwd,
+      pid: session.pid || params.pid,
+    });
+
     return {
       content: [
         {
