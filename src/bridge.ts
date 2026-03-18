@@ -2,7 +2,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 
-const BRIDGE_HOST = "127.0.0.1";
+const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 const BRIDGES_DIR = path.join(
   process.env.HOME || process.env.USERPROFILE || "/tmp",
   ".ccrouter",
@@ -20,6 +20,7 @@ interface BridgeResponse {
 interface BridgeRegistry {
   port: number;
   pid: number;
+  host?: string;
   started: number;
 }
 
@@ -47,15 +48,20 @@ function discoverBridges(): BridgeRegistry[] {
         fs.readFileSync(filePath, "utf-8")
       ) as BridgeRegistry;
 
-      // Check if the process is still alive
-      try {
-        process.kill(data.pid, 0);
+      // Remote bridges can't be PID-checked -- just trust them
+      if ((data as any).remote) {
         bridges.push(data);
-      } catch {
-        // Dead process, clean up registry file
+      } else {
+        // Local bridge: check if the process is still alive
         try {
-          fs.unlinkSync(filePath);
-        } catch {}
+          process.kill(data.pid, 0);
+          bridges.push(data);
+        } catch {
+          // Dead process, clean up registry file
+          try {
+            fs.unlinkSync(filePath);
+          } catch {}
+        }
       }
     } catch {
       // Corrupt file, remove it
@@ -73,14 +79,15 @@ function discoverBridges(): BridgeRegistry[] {
  */
 function sendToBridge(
   port: number,
-  tty: string,
-  text: string
+  text: string,
+  routing: { tty?: string; session_id?: string; pid?: number },
+  host?: string
 ): Promise<BridgeResponse | null> {
   return new Promise((resolve) => {
-    const payload = JSON.stringify({ tty, text });
+    const payload = JSON.stringify({ ...routing, text });
     const req = http.request(
       {
-        hostname: BRIDGE_HOST,
+        hostname: host || DEFAULT_BRIDGE_HOST,
         port,
         path: "/send",
         method: "POST",
@@ -116,11 +123,12 @@ function sendToBridge(
 
 /**
  * Push a message to a terminal via any available bridge instance.
+ * Accepts tty (Mac), session_id, or pid for routing.
  * Tries each discovered bridge until one succeeds.
  */
 export async function pushToTerminal(
-  tty: string,
-  text: string
+  text: string,
+  routing: { tty?: string; session_id?: string; pid?: number }
 ): Promise<BridgeResponse | null> {
   const bridges = discoverBridges();
   if (bridges.length === 0) {
@@ -128,16 +136,13 @@ export async function pushToTerminal(
   }
 
   for (const bridge of bridges) {
-    const result = await sendToBridge(bridge.port, tty, text);
+    const result = await sendToBridge(bridge.port, text, routing, bridge.host);
     if (result?.ok) {
       return result;
     }
-    // "not found" means this bridge doesn't have the terminal -- try next
-    // null or other errors mean bridge is broken -- also try next
   }
 
-  // No bridge had the terminal
-  return { ok: false, error: `No bridge instance has a terminal for tty ${tty}` };
+  return { ok: false, error: `No bridge instance has a terminal for ${JSON.stringify(routing)}` };
 }
 
 /**
@@ -145,4 +150,47 @@ export async function pushToTerminal(
  */
 export function isBridgeAvailable(): boolean {
   return discoverBridges().length > 0;
+}
+
+/**
+ * Notify all bridge instances about a session registration or rename.
+ * This allows the Cursor extension to persist session->tty mappings
+ * for crash recovery (claude-r).
+ */
+export function notifyBridges(session: {
+  tty?: string;
+  session_id: string;
+  friendly_name: string;
+  cwd?: string;
+  pid?: number;
+}): void {
+  const bridges = discoverBridges();
+  const payload = JSON.stringify({
+    tty: session.tty || null,
+    session_id: session.session_id,
+    friendly_name: session.friendly_name,
+    cwd: session.cwd || "",
+    pid: session.pid || null,
+  });
+
+  for (const bridge of bridges) {
+    const req = http.request(
+      {
+        hostname: bridge.host || DEFAULT_BRIDGE_HOST,
+        port: bridge.port,
+        path: "/notify",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+        },
+        timeout: 2000,
+      },
+      () => {} // fire and forget
+    );
+    req.on("error", () => {}); // ignore errors
+    req.on("timeout", () => req.destroy());
+    req.write(payload);
+    req.end();
+  }
 }

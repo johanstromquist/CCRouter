@@ -21,7 +21,8 @@
     "build:vsix": "cd cursor-extension && npx -y @vscode/vsce package --allow-missing-repository",
     "prepublishOnly": "npm run build:vsix && npm run build",
     "start:daemon": "node dist/daemon.js",
-    "start:mcp": "node dist/mcp-server.js"
+    "start:mcp": "node dist/mcp-server.js",
+    "start:mcp-sse": "node dist/mcp-server.js --sse"
   },
   "keywords": [
     "claude-code",

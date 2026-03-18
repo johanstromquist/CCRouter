@@ -1,4 +1,6 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import {
   registerSession,
   deregisterSession,
@@ -15,7 +17,7 @@ import {
   cleanupOldAcks,
   resolveSession,
 } from "./db.js";
-import { pushToTerminal } from "./bridge.js";
+import { pushToTerminal, notifyBridges } from "./bridge.js";
 import { scanLockFiles, isProcessAlive } from "./lock-scanner.js";
 import type { RegisterRequest, Session } from "./types.js";
 
@@ -48,6 +50,16 @@ async function handleRegister(req: IncomingMessage, res: ServerResponse) {
     return;
   }
   const session = registerSession(body);
+
+  // Notify bridges so they can persist the session mapping and build terminal maps
+  notifyBridges({
+    tty: session.tty || body.tty,
+    session_id: session.session_id,
+    friendly_name: session.friendly_name,
+    cwd: session.cwd || body.cwd,
+    pid: session.pid || body.pid,
+  });
+
   json(res, 200, {
     friendly_name: session.friendly_name,
     session_id: session.session_id,
@@ -85,6 +97,41 @@ async function handleAck(req: IncomingMessage, res: ServerResponse) {
   }
   const acked = ackMessage(body.channel, body.sender, body.tty);
   json(res, 200, { ok: true, acked });
+}
+
+async function handleRegisterBridge(req: IncomingMessage, res: ServerResponse) {
+  const body = JSON.parse(await readBody(req)) as {
+    port: number;
+    host: string;
+    pid?: number;
+  };
+  if (!body.port || !body.host) {
+    json(res, 400, { error: "port and host required" });
+    return;
+  }
+
+  // Write a bridge registry file so bridge.ts can discover this remote bridge
+  const bridgesDir = path.join(
+    process.env.HOME || process.env.USERPROFILE || "/tmp",
+    ".ccrouter",
+    "bridges"
+  );
+  fs.mkdirSync(bridgesDir, { recursive: true });
+
+  const registryFile = path.join(bridgesDir, `remote-${body.host}-${body.port}.json`);
+  fs.writeFileSync(
+    registryFile,
+    JSON.stringify({
+      port: body.port,
+      host: body.host,
+      pid: body.pid || 0,
+      remote: true,
+      started: Date.now(),
+    })
+  );
+
+  console.log(`[bridge] Remote bridge registered: ${body.host}:${body.port}`);
+  json(res, 200, { ok: true, registered: `${body.host}:${body.port}` });
 }
 
 function handleSessionInfo(sessionId: string, res: ServerResponse) {
@@ -135,33 +182,41 @@ async function retryUnackedMessages() {
   const unacked = getUnackedMessages(30);
 
   for (const pending of unacked) {
+    // Resolve target session for routing info
+    const targetSession = resolveSession(pending.target_name);
+    const routing = {
+      tty: pending.target_tty || undefined,
+      session_id: targetSession?.session_id,
+      pid: targetSession?.pid || undefined,
+    };
+
     if (pending.retry_count === 0) {
-      // First retry: just send Enter (the original message may be stuck in buffer)
       console.log(
         `[retry] Nudging ${pending.target_name} (Enter) for message ${pending.message_id} in ${pending.channel}`
       );
-      await pushToTerminal(pending.target_tty, "");
+      await pushToTerminal("", routing);
       incrementRetry(pending.id);
     } else if (pending.retry_count === 1) {
-      // Second retry: send a follow-up question
       console.log(
         `[retry] Prodding ${pending.target_name} for message ${pending.message_id} in ${pending.channel}`
       );
       const nudge = `[${pending.channel}] ${pending.sender_name}: Did you receive my recent message?`;
-      await pushToTerminal(pending.target_tty, nudge);
+      await pushToTerminal(nudge, routing);
       incrementRetry(pending.id);
     } else {
-      // Give up and notify sender
       console.log(
         `[retry] Delivery failed for message ${pending.message_id} to ${pending.target_name} -- notifying ${pending.sender_name}`
       );
       markAckFailed(pending.id);
 
-      // Push failure notification to sender
       const sender = resolveSession(pending.sender_name);
-      if (sender?.tty) {
+      if (sender) {
         const notice = `[CCRouter] Message delivery to "${pending.target_name}" in ${pending.channel} was not acknowledged after retries. The agent may be unresponsive.`;
-        await pushToTerminal(sender.tty, notice);
+        await pushToTerminal(notice, {
+          tty: sender.tty || undefined,
+          session_id: sender.session_id,
+          pid: sender.pid || undefined,
+        });
       }
     }
   }
@@ -195,6 +250,8 @@ const httpServer = createServer(async (req, res) => {
       await handleDeregister(req, res);
     } else if (req.method === "POST" && url.pathname === "/ack") {
       await handleAck(req, res);
+    } else if (req.method === "POST" && url.pathname === "/register-bridge") {
+      await handleRegisterBridge(req, res);
     } else if (req.method === "GET" && url.pathname === "/health") {
       handleHealth(req, res);
     } else if (
@@ -218,8 +275,9 @@ function main() {
   // Initialize DB
   getDb();
 
-  httpServer.listen(PORT, "127.0.0.1", () => {
-    console.log(`CCRouter daemon listening on http://127.0.0.1:${PORT}`);
+  const BIND_HOST = process.env.CCROUTER_BIND_HOST || "0.0.0.0";
+  httpServer.listen(PORT, BIND_HOST, () => {
+    console.log(`CCRouter daemon listening on http://${BIND_HOST}:${PORT}`);
   });
 
   // Periodic cleanup (30s)

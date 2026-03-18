@@ -1,6 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { createServer as createHttpServer } from "node:http";
 import { execSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import { z } from "zod";
 import {
   registerSession,
@@ -25,8 +33,17 @@ import {
   createPendingAck,
 } from "./db.js";
 import { readTranscript, formatTranscript } from "./transcript.js";
-import { pushToTerminal } from "./bridge.js";
+import { pushToTerminal, notifyBridges } from "./bridge.js";
 import type { Session } from "./types.js";
+
+/** Push a message to a session's terminal using all available routing info */
+async function pushToSession(session: Session, text: string) {
+  return pushToTerminal(text, {
+    tty: session.tty || undefined,
+    session_id: session.session_id,
+    pid: session.pid || undefined,
+  });
+}
 
 // Determine our session ID from environment
 let currentSessionId: string | null =
@@ -111,6 +128,93 @@ server.tool(
         },
       ],
     };
+  }
+);
+
+// --- install ---
+server.tool(
+  "install",
+  "Install CCRouter on this machine. Downloads and installs the Cursor extension for push message delivery. Run this once on any new machine after adding the MCP.",
+  {},
+  async () => {
+    // Determine the MCP server URL (SSE mode) from the connection context
+    const mcpHost = process.env.CCROUTER_MCP_HOST || "0.0.0.0";
+    const mcpPort = process.env.CCROUTER_MCP_PORT || "19920";
+    // In SSE mode, we can serve the VSIX. In stdio mode, it's local.
+    const isSSE = process.argv.includes("--sse");
+
+    if (isSSE) {
+      // Remote mode -- CC should download, install, and configure
+      const serverIp = process.env.CCROUTER_ADVERTISE_IP || "192.168.68.87";
+      const daemonPort = process.env.CCROUTER_DAEMON_PORT || "19919";
+      const daemonUrl = `http://${serverIp}:${daemonPort}`;
+      const extensionUrl = `http://${serverIp}:${mcpPort}/extension`;
+
+      // Determine OS-appropriate temp path and config path
+      const instructions = [
+        "To complete CCRouter setup, run these commands:",
+        "",
+        "1. Download and install the Cursor extension:",
+        `   curl -o ccrouter-bridge.vsix ${extensionUrl}`,
+        `   cursor --install-extension ccrouter-bridge.vsix`,
+        "",
+        "2. Configure the extension to connect to the daemon:",
+        `   Write this JSON to ~/.ccrouter/config.json:`,
+        `   {"daemonUrl": "${daemonUrl}"}`,
+        "",
+        "   On Mac/Linux:",
+        `   mkdir -p ~/.ccrouter && echo '{"daemonUrl":"${daemonUrl}"}' > ~/.ccrouter/config.json`,
+        "",
+        "   On Windows (PowerShell):",
+        `   New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\\.ccrouter" | Out-Null; '{"daemonUrl":"${daemonUrl}"}' | Set-Content "$env:USERPROFILE\\.ccrouter\\config.json"`,
+        "",
+        "3. Reload Cursor (Ctrl+Shift+P > Reload Window)",
+        "",
+        "4. Call register_self with your session_id",
+        "",
+        "After setup, other sessions can push messages directly to your terminal.",
+      ].join("\n");
+
+      return {
+        content: [{ type: "text" as const, text: instructions }],
+      };
+    }
+
+    // Local/stdio mode -- install directly
+    const vsixPaths = [
+      path.join(__dirname, "..", "cursor-extension", "ccrouter-terminal-bridge-1.0.0.vsix"),
+      path.join(__dirname, "..", "..", "cursor-extension", "ccrouter-terminal-bridge-1.0.0.vsix"),
+    ];
+    let vsixPath: string | null = null;
+    for (const p of vsixPaths) {
+      try { fs.statSync(p); vsixPath = p; break; } catch {}
+    }
+
+    if (!vsixPath) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: "VSIX file not found. Build it first: cd cursor-extension && npx @vscode/vsce package --allow-missing-repository",
+        }],
+      };
+    }
+
+    try {
+      execSync(`cursor --install-extension "${vsixPath}"`, { encoding: "utf-8", timeout: 30000 });
+      return {
+        content: [{
+          type: "text" as const,
+          text: "CCRouter Cursor extension installed successfully. Reload Cursor to activate (Ctrl+Shift+P > Reload Window).",
+        }],
+      };
+    } catch (err: any) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Extension install failed: ${err.message}\n\nTry manually: cursor --install-extension "${vsixPath}"`,
+        }],
+      };
+    }
   }
 );
 
@@ -244,6 +348,18 @@ server.tool(
     const result = updateSessionName(id, params.name);
     if (result === true) {
       currentSessionName = params.name;
+
+      // Notify bridges so they persist the new name for crash recovery
+      const session = getSessionById(id);
+      if (session) {
+        notifyBridges({
+          tty: session.tty || undefined,
+          session_id: session.session_id,
+          friendly_name: params.name,
+          cwd: session.cwd || undefined,
+        });
+      }
+
       return {
         content: [
           { type: "text" as const, text: `Name changed to "${params.name}"` },
@@ -375,16 +491,11 @@ server.tool(
     createInvite(channel, name, target.friendly_name);
 
     // Push-deliver the invitation
-    let pushStatus = "";
-    if (target.tty) {
-      const prompt = `[CCRouter] ${name} invited you to channel ${channel}. Use accept_invite to join.`;
-      const result = await pushToTerminal(target.tty, prompt);
-      pushStatus = result?.ok
-        ? " (pushed to terminal)"
-        : " (queued -- bridge unavailable)";
-    } else {
-      pushStatus = " (queued -- no tty)";
-    }
+    const prompt = `[CCRouter] ${name} invited you to channel ${channel}. Use accept_invite to join.`;
+    const result = await pushToSession(target, prompt);
+    const pushStatus = result?.ok
+      ? " (pushed to terminal)"
+      : " (queued -- bridge unavailable)";
 
     return {
       content: [
@@ -434,9 +545,9 @@ server.tool(
     for (const member of existingMembers) {
       if (member.session_name === name) continue;
       const session = resolveSession(member.session_name);
-      if (session?.tty) {
+      if (session) {
         const prompt = `[${channel}] ${name} joined the channel.`;
-        await pushToTerminal(session.tty, prompt);
+        await pushToSession(session, prompt);
       }
     }
 
@@ -480,9 +591,9 @@ server.tool(
     // Notify the inviter that the invite was declined
     if (invite) {
       const inviter = resolveSession(invite.from_session);
-      if (inviter?.tty) {
+      if (inviter) {
         const prompt = `[${channel}] ${name} declined the invitation.`;
-        await pushToTerminal(inviter.tty, prompt);
+        await pushToSession(inviter, prompt);
       }
     }
 
@@ -546,12 +657,12 @@ server.tool(
 
     for (const member of targets) {
       const session = resolveSession(member.session_name);
-      if (session?.tty) {
+      if (session) {
         const prompt = `[${channel}] ${name}: ${params.message}`;
-        const result = await pushToTerminal(session.tty, prompt);
+        const result = await pushToSession(session, prompt);
         if (result?.ok) {
           pushed++;
-          createPendingAck(msg.id, channel, name, member.session_name, session.tty);
+          createPendingAck(msg.id, channel, name, member.session_name, session.tty || session.session_id);
         }
       }
     }
@@ -667,9 +778,9 @@ server.tool(
     // Notify remaining members
     for (const member of remaining) {
       const session = resolveSession(member.session_name);
-      if (session?.tty) {
+      if (session) {
         const prompt = `[${channel}] ${name} left the channel.`;
-        await pushToTerminal(session.tty, prompt);
+        await pushToSession(session, prompt);
       }
     }
 
@@ -758,14 +869,107 @@ server.tool(
 
 // --- Start server ---
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const mode = process.argv.includes("--sse") ? "sse" : "stdio";
 
-  // If we have a session ID, try to look up our name from the DB
-  if (currentSessionId) {
-    const s = getSessionById(currentSessionId);
-    if (s) {
-      currentSessionName = s.friendly_name;
+  if (mode === "sse") {
+    // Network mode: SSE transport for remote CC sessions
+    const SSE_PORT = parseInt(process.env.CCROUTER_MCP_PORT || "19920", 10);
+    const SSE_HOST = process.env.CCROUTER_MCP_HOST || "0.0.0.0";
+
+    // Track active SSE transports per session
+    const transports = new Map<string, SSEServerTransport>();
+
+    const httpServer = createHttpServer(async (req, res) => {
+      // CORS for cross-origin requests from remote machines
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      if (req.url === "/sse" && req.method === "GET") {
+        // New SSE connection -- each remote CC gets its own transport + server
+        const transport = new SSEServerTransport("/messages", res);
+        transports.set(transport.sessionId, transport);
+
+        transport.onclose = () => {
+          transports.delete(transport.sessionId);
+        };
+
+        // Each connection needs its own McpServer because McpServer
+        // can only be connected to one transport at a time.
+        // We import the tool definitions via the shared `server` setup.
+        // For simplicity, connect the shared server to the latest transport.
+        // This means only one remote session at a time is fully active.
+        // TODO: support multiple concurrent remote sessions
+        await server.connect(transport);
+        // connect() calls start() internally -- do NOT call start() again
+      } else if (req.url?.startsWith("/messages") && req.method === "POST") {
+        // Route POST to the correct transport by sessionId query param
+        const url = new URL(req.url, `http://localhost:${SSE_PORT}`);
+        const sessionId = url.searchParams.get("sessionId");
+        const transport = sessionId ? transports.get(sessionId) : transports.values().next().value;
+        if (transport) {
+          await transport.handlePostMessage(req, res);
+        } else {
+          res.writeHead(404);
+          res.end("No active SSE session");
+        }
+      } else if (req.url === "/extension" && req.method === "GET") {
+        // Serve the VSIX file for remote installation
+        const vsixPaths = [
+          path.join(__dirname, "..", "cursor-extension", "ccrouter-terminal-bridge-1.0.0.vsix"),
+          path.join(__dirname, "..", "..", "cursor-extension", "ccrouter-terminal-bridge-1.0.0.vsix"),
+          path.join(process.env.HOME || "", ".ccrouter", "ccrouter-terminal-bridge-1.0.0.vsix"),
+        ];
+        let vsixPath: string | null = null;
+        for (const p of vsixPaths) {
+          try { fs.statSync(p); vsixPath = p; break; } catch {}
+        }
+        if (vsixPath) {
+          const data = fs.readFileSync(vsixPath);
+          res.writeHead(200, {
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": "attachment; filename=ccrouter-terminal-bridge-1.0.0.vsix",
+            "Content-Length": data.length,
+          });
+          res.end(data);
+        } else {
+          res.writeHead(404);
+          res.end("Extension VSIX not found on server");
+        }
+      } else if (req.url === "/health" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: true,
+          mode: "sse",
+          activeSessions: transports.size,
+        }));
+      } else {
+        res.writeHead(404);
+        res.end("Not found");
+      }
+    });
+
+    httpServer.listen(SSE_PORT, SSE_HOST, () => {
+      console.log(`CCRouter MCP server (SSE) listening on http://${SSE_HOST}:${SSE_PORT}`);
+      console.log(`Remote CC: claude mcp add ccrouter --transport sse --url http://<this-ip>:${SSE_PORT}/sse`);
+    });
+  } else {
+    // Local mode: stdio transport (default, used by local CC sessions)
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+
+    // If we have a session ID, try to look up our name from the DB
+    if (currentSessionId) {
+      const s = getSessionById(currentSessionId);
+      if (s) {
+        currentSessionName = s.friendly_name;
+      }
     }
   }
 }

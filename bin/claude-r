@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# claude-r: Resume the last Claude Code session for the current workspace.
+# Reads session info persisted by the CCRouter Cursor extension.
+#
+# Usage:
+#   claude-r           # resume the most recent session in $PWD
+#   claude-r --list    # show all saved sessions for $PWD
+#   claude-r --pick    # interactive picker for multi-session workspaces
+
+set -euo pipefail
+
+SESSIONS_DIR="${HOME}/.ccrouter/last-sessions"
+
+# Hash the cwd to find the session file
+CWD_HASH=$(echo -n "$PWD" | md5 2>/dev/null || echo -n "$PWD" | md5sum 2>/dev/null | cut -d' ' -f1)
+SESSION_FILE="${SESSIONS_DIR}/${CWD_HASH}.json"
+
+if [ ! -f "$SESSION_FILE" ]; then
+  echo "No saved sessions for this workspace ($PWD)"
+  echo "Start a session normally with 'claude' first."
+  exit 1
+fi
+
+# Parse the session file
+SESSIONS=$(cat "$SESSION_FILE")
+COUNT=$(echo "$SESSIONS" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+
+if [ "$COUNT" = "0" ]; then
+  echo "No saved sessions for this workspace."
+  exit 1
+fi
+
+# Handle flags
+case "${1:-}" in
+  --list)
+    echo "Saved sessions for $PWD:"
+    echo ""
+    echo "$SESSIONS" | python3 -c "
+import sys, json
+sessions = json.load(sys.stdin)
+for i, s in enumerate(sessions):
+    name = s.get('friendlyName', 'unknown')
+    sid = s.get('sessionId', '?')
+    updated = s.get('updatedAt', '?')
+    print(f'  [{i+1}] {name} (session: {sid[:12]}..., last seen: {updated})')
+"
+    exit 0
+    ;;
+  --pick)
+    echo "Saved sessions for $PWD:"
+    echo ""
+    echo "$SESSIONS" | python3 -c "
+import sys, json
+sessions = json.load(sys.stdin)
+for i, s in enumerate(sessions):
+    name = s.get('friendlyName', 'unknown')
+    sid = s.get('sessionId', '?')
+    print(f'  [{i+1}] {name} ({sid[:12]}...)')
+"
+    echo ""
+    read -p "Pick a session number: " PICK
+    SESSION_ID=$(echo "$SESSIONS" | python3 -c "
+import sys, json
+sessions = json.load(sys.stdin)
+idx = int('$PICK') - 1
+if 0 <= idx < len(sessions):
+    print(sessions[idx]['sessionId'])
+else:
+    print('')
+" 2>/dev/null)
+    if [ -z "$SESSION_ID" ]; then
+      echo "Invalid selection."
+      exit 1
+    fi
+    echo "Resuming session $SESSION_ID..."
+    exec claude --resume "$SESSION_ID"
+    ;;
+  "")
+    # Default: resume the most recent session
+    SESSION_ID=$(echo "$SESSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['sessionId'])" 2>/dev/null || echo "")
+    FRIENDLY_NAME=$(echo "$SESSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin)[0].get('friendlyName','unknown'))" 2>/dev/null || echo "unknown")
+
+    if [ -z "$SESSION_ID" ]; then
+      echo "Could not read session data."
+      exit 1
+    fi
+
+    if [ "$COUNT" != "1" ]; then
+      echo "Multiple sessions found for this workspace. Resuming most recent: $FRIENDLY_NAME"
+      echo "(Use 'claude-r --pick' to choose a different one)"
+      echo ""
+    fi
+
+    echo "Resuming session: $FRIENDLY_NAME ($SESSION_ID)"
+    exec claude --resume "$SESSION_ID"
+    ;;
+  *)
+    echo "Usage: claude-r [--list | --pick]"
+    exit 1
+    ;;
+esac
