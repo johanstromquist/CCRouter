@@ -118,6 +118,14 @@ async function handleRegisterBridge(req: IncomingMessage, res: ServerResponse) {
   );
   fs.mkdirSync(bridgesDir, { recursive: true });
 
+  // Clean up old bridge files for this host (port may have changed on restart)
+  try {
+    const files = fs.readdirSync(bridgesDir).filter((f: string) => f.startsWith(`remote-${body.host}-`));
+    for (const f of files) {
+      try { fs.unlinkSync(path.join(bridgesDir, f)); } catch {}
+    }
+  } catch {}
+
   const registryFile = path.join(bridgesDir, `remote-${body.host}-${body.port}.json`);
   fs.writeFileSync(
     registryFile,
@@ -150,8 +158,11 @@ function cleanupStaleSessions() {
   const now = Date.now();
 
   for (const session of sessions) {
-    // 1. Dead PID -- immediate cleanup
-    if (session.pid && !isProcessAlive(session.pid)) {
+    // 1. Dead PID -- immediate cleanup (local sessions only)
+    // Sessions without a tty may be remote (Windows, SSE) -- their PIDs
+    // are from a different machine and can't be checked locally.
+    // Use heartbeat timeout for those instead.
+    if (session.pid && session.tty && !isProcessAlive(session.pid)) {
       console.log(
         `[cleanup] Deactivating "${session.friendly_name}" -- PID ${session.pid} is dead`
       );
