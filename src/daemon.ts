@@ -89,13 +89,17 @@ async function handleAck(req: IncomingMessage, res: ServerResponse) {
   const body = JSON.parse(await readBody(req)) as {
     channel: string;
     sender: string;
-    tty: string;
+    tty?: string;
+    session_id?: string;
   };
-  if (!body.channel || !body.sender || !body.tty) {
-    json(res, 400, { error: "channel, sender, and tty required" });
+  if (!body.channel || !body.sender || (!body.tty && !body.session_id)) {
+    json(res, 400, { error: "channel, sender, and (tty or session_id) required" });
     return;
   }
-  const acked = ackMessage(body.channel, body.sender, body.tty);
+  const acked = ackMessage(body.channel, body.sender, {
+    targetTty: body.tty,
+    targetSessionId: body.session_id,
+  });
   json(res, 200, { ok: true, acked });
 }
 

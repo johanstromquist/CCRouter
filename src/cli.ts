@@ -35,9 +35,12 @@ function log(step: string, msg: string) {
   console.log(`  [${step}] ${msg}`);
 }
 
+const IS_WIN = platform() === "win32";
+
 function findOnPath(name: string): string | null {
+  const cmd = IS_WIN ? `where ${name}` : `which ${name}`;
   try {
-    return execSync(`which ${name}`, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+    return execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim().split("\n")[0];
   } catch {
     return null;
   }
@@ -83,9 +86,17 @@ function copyAppFiles() {
     }
   }
 
-  // Make hooks executable
-  chmodSync(join(APP_DIR, "hooks", "session-start.sh"), 0o755);
-  chmodSync(join(APP_DIR, "hooks", "session-end.sh"), 0o755);
+  // Make hooks executable (Unix only -- Windows doesn't use file permissions)
+  if (!IS_WIN) {
+    for (const hook of readdirSync(join(APP_DIR, "hooks")).filter(f => f.endsWith(".sh"))) {
+      chmodSync(join(APP_DIR, "hooks", hook), 0o755);
+    }
+  }
+
+  // Create additional directories for session persistence
+  mkdirSync(join(CCROUTER_HOME, "last-sessions"), { recursive: true });
+  mkdirSync(join(CCROUTER_HOME, "bridges"), { recursive: true });
+  mkdirSync(join(CCROUTER_HOME, "logs"), { recursive: true });
 }
 
 function installDependencies() {
@@ -109,23 +120,49 @@ function configureMcp() {
   );
 }
 
+function hookCommand(scriptName: string): string {
+  if (IS_WIN) {
+    // Windows: use PowerShell with forward slashes (CC runs hooks through bash which eats backslashes)
+    const psPath = join(APP_DIR, "hooks", scriptName).replace(/\\/g, "/");
+    return `powershell -NoProfile -ExecutionPolicy Bypass -File ${psPath}`;
+  }
+  return join(APP_DIR, "hooks", scriptName);
+}
+
 function configureHooksAndPermissions() {
   const settings = readSettingsJson();
 
-  // --- Hooks (additive) ---
+  // --- Hooks (additive, platform-aware) ---
   if (!settings.hooks) settings.hooks = {};
 
-  const startCommand = join(APP_DIR, "hooks", "session-start.sh");
-  const endCommand = join(APP_DIR, "hooks", "session-end.sh");
+  const ext = IS_WIN ? ".ps1" : ".sh";
 
   settings.hooks.SessionStart = upsertHookEntry(
     settings.hooks.SessionStart || [],
-    startCommand
+    hookCommand(`session-start${ext}`)
   );
   settings.hooks.SessionEnd = upsertHookEntry(
     settings.hooks.SessionEnd || [],
-    endCommand
+    hookCommand(`session-end${ext}`)
   );
+
+  // UserPromptSubmit hook for message delivery acks
+  if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
+  const ackCmd = hookCommand(`ack-message${ext}`);
+  const hasAckHook = settings.hooks.UserPromptSubmit.some((entry: any) =>
+    entry.hooks?.some((h: any) => h.command?.includes("ack-message"))
+  );
+  if (!hasAckHook) {
+    settings.hooks.UserPromptSubmit.push({
+      hooks: [{ type: "command", command: ackCmd, async: true }],
+    });
+  }
+
+  // StatusLine
+  settings.statusLine = {
+    type: "command",
+    command: hookCommand(`statusline${ext}`),
+  };
 
   // --- Permissions (additive) ---
   if (!settings.permissions) settings.permissions = {};
@@ -335,7 +372,10 @@ async function uninstall() {
     const settings = readSettingsJson();
 
     // Remove CCRouter hooks
-    for (const event of ["SessionStart", "SessionEnd"]) {
+    if (settings.statusLine?.command?.includes("ccrouter")) {
+      delete settings.statusLine;
+    }
+    for (const event of ["SessionStart", "SessionEnd", "UserPromptSubmit"]) {
       if (!settings.hooks?.[event]) continue;
       for (const entry of settings.hooks[event]) {
         if (entry.hooks) {

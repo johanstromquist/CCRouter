@@ -45,15 +45,34 @@ async function pushToSession(session: Session, text: string) {
   });
 }
 
-// Determine our session ID from environment
+// Determine our session ID from environment or file
 let currentSessionId: string | null =
   process.env.CCROUTER_SESSION_ID || null;
+
+// Fallback: read session_id from file (Windows hooks write here since env vars
+// don't propagate to the MCP server subprocess)
+if (!currentSessionId) {
+  const sidFile = path.join(
+    process.env.HOME || process.env.USERPROFILE || "",
+    ".ccrouter",
+    "session_id"
+  );
+  try {
+    currentSessionId = fs.readFileSync(sidFile, "utf-8").trim() || null;
+  } catch {}
+}
+
 let currentSessionName: string | null = null;
 
 /**
  * Walk up the process tree to find our tty, then look up the session by tty.
+ * Unix-only: Windows has no tty concept and no `ps` command.
  */
 function findSessionByProcessTree(): Session | undefined {
+  // Windows: skip process tree walking entirely.
+  // Session identification on Windows uses file-based session_id.
+  if (process.platform === "win32") return undefined;
+
   let walkPid = process.pid;
   for (let i = 0; i < 5; i++) {
     try {
@@ -662,7 +681,7 @@ server.tool(
         const result = await pushToSession(session, prompt);
         if (result?.ok) {
           pushed++;
-          createPendingAck(msg.id, channel, name, member.session_name, session.tty || session.session_id);
+          createPendingAck(msg.id, channel, name, member.session_name, session.tty || "", session.session_id);
         }
       }
     }

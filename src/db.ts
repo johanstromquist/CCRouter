@@ -57,6 +57,14 @@ export function getDb(): Database.Database {
     _db.exec("ALTER TABLE sessions ADD COLUMN tty TEXT");
   }
 
+  // Migration: add target_session_id to pending_acks if missing
+  const ackCols = _db
+    .prepare("PRAGMA table_info(pending_acks)")
+    .all() as { name: string }[];
+  if (ackCols.length > 0 && !ackCols.some((c) => c.name === "target_session_id")) {
+    _db.exec("ALTER TABLE pending_acks ADD COLUMN target_session_id TEXT");
+  }
+
   // Migration: rename messages.to_session -> messages.channel
   const msgCols = _db
     .prepare("PRAGMA table_info(messages)")
@@ -92,7 +100,8 @@ export function getDb(): Database.Database {
       channel TEXT NOT NULL,
       sender_name TEXT NOT NULL,
       target_name TEXT NOT NULL,
-      target_tty TEXT NOT NULL,
+      target_tty TEXT,
+      target_session_id TEXT,
       created_at TEXT NOT NULL,
       acked_at TEXT,
       retry_count INTEGER DEFAULT 0,
@@ -560,7 +569,8 @@ export interface PendingAck {
   channel: string;
   sender_name: string;
   target_name: string;
-  target_tty: string;
+  target_tty: string | null;
+  target_session_id: string | null;
   created_at: string;
   acked_at: string | null;
   retry_count: number;
@@ -572,25 +582,62 @@ export function createPendingAck(
   channel: string,
   senderName: string,
   targetName: string,
-  targetTty: string
+  targetIdentifier: string,
+  targetSessionId?: string
 ): void {
   const db = getDb();
   db.prepare(
-    `INSERT INTO pending_acks (message_id, channel, sender_name, target_name, target_tty, created_at, retry_count, failed)
-     VALUES (?, ?, ?, ?, ?, ?, 0, 0)`
-  ).run(messageId, channel, senderName, targetName, targetTty, new Date().toISOString());
+    `INSERT INTO pending_acks (message_id, channel, sender_name, target_name, target_tty, target_session_id, created_at, retry_count, failed)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)`
+  ).run(messageId, channel, senderName, targetName, targetIdentifier, targetSessionId || null, new Date().toISOString());
 }
 
-export function ackMessage(channel: string, senderName: string, targetTty: string): boolean {
+export function ackMessage(
+  channel: string,
+  senderName: string,
+  opts: { targetTty?: string; targetSessionId?: string }
+): boolean {
   const db = getDb();
-  const pending = db
-    .prepare(
-      `SELECT id FROM pending_acks
-       WHERE channel = ? AND sender_name = ? AND target_tty = ?
-         AND acked_at IS NULL AND failed = 0
-       ORDER BY created_at DESC LIMIT 1`
-    )
-    .get(channel, senderName, targetTty) as { id: number } | undefined;
+  let pending: { id: number } | undefined;
+
+  if (opts.targetTty) {
+    // Mac: match by tty
+    pending = db
+      .prepare(
+        `SELECT id FROM pending_acks
+         WHERE channel = ? AND sender_name = ? AND target_tty = ?
+           AND acked_at IS NULL AND failed = 0
+         ORDER BY created_at DESC LIMIT 1`
+      )
+      .get(channel, senderName, opts.targetTty) as { id: number } | undefined;
+  }
+
+  if (!pending && opts.targetSessionId) {
+    // Windows/remote: match by session_id
+    pending = db
+      .prepare(
+        `SELECT id FROM pending_acks
+         WHERE channel = ? AND sender_name = ? AND target_session_id = ?
+           AND acked_at IS NULL AND failed = 0
+         ORDER BY created_at DESC LIMIT 1`
+      )
+      .get(channel, senderName, opts.targetSessionId) as { id: number } | undefined;
+  }
+
+  if (!pending && opts.targetSessionId) {
+    // Fallback: match by target_name (resolved from session_id)
+    const session = getSessionById(opts.targetSessionId);
+    if (session) {
+      pending = db
+        .prepare(
+          `SELECT id FROM pending_acks
+           WHERE channel = ? AND sender_name = ? AND target_name = ?
+             AND acked_at IS NULL AND failed = 0
+           ORDER BY created_at DESC LIMIT 1`
+        )
+        .get(channel, senderName, session.friendly_name) as { id: number } | undefined;
+    }
+  }
 
   if (!pending) return false;
 
