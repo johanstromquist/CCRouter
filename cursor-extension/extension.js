@@ -301,12 +301,6 @@ async function sendToTerminal(data) {
     }
   }
 
-  // 3. Fallback: if only one terminal, use it
-  if (!terminal && vscode.window.terminals.length === 1) {
-    terminal = vscode.window.terminals[0];
-    method = "single_terminal_fallback";
-  }
-
   if (!terminal) {
     return {
       ok: false,
