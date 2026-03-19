@@ -883,7 +883,13 @@ async function main() {
           // Try to bind the first persisted session that's still active in daemon
           for (const sid of persisted) {
             const s = getSessionById(sid);
-            if (s && s.is_active === 1) {
+            if (s) {
+              // Reactivate if deactivated (heartbeat timeout during server restart)
+              if (s.is_active === 0) {
+                const db = getDb();
+                db.prepare("UPDATE sessions SET is_active = 1, last_seen_at = ? WHERE session_id = ?")
+                  .run(new Date().toISOString(), sid);
+              }
               setSessionId(sid);
               boundTransports.add(transport.sessionId);
               log.info(`Auto-bound reconnected session ${sid} (${s.friendly_name}) to transport ${transport.sessionId}`);
