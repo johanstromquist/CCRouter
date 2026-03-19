@@ -5,10 +5,18 @@ try {
     $input = [Console]::In.ReadToEnd() | ConvertFrom-Json
     $sid = $input.session_id
     if ($sid) {
-        $input.tool_input | Add-Member -NotePropertyName '_session_id' -NotePropertyValue $sid -Force
+        $toolInput = $input.tool_input
+        $toolInput | Add-Member -NotePropertyName '_session_id' -NotePropertyValue $sid -Force
+        $output = @{
+            hookSpecificOutput = @{
+                hookEventName = 'PreToolUse'
+                permissionDecision = 'allow'
+                updatedInput = $toolInput
+            }
+        }
+        $output | ConvertTo-Json -Depth 10
     }
-    $input | ConvertTo-Json -Depth 10
+    exit 0
 } catch {
-    # On error, pass through unchanged
-    [Console]::In.ReadToEnd()
+    exit 0
 }

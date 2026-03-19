@@ -6,12 +6,20 @@ set -euo pipefail
 INPUT=$(cat)
 SID=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null || echo "")
 if [ -n "$SID" ]; then
-  echo "$INPUT" | python3 -c "
+  # Get existing tool_input and add _session_id
+  UPDATED=$(echo "$INPUT" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
-d['tool_input']['_session_id'] = sys.argv[1]
-print(json.dumps(d))
-" "$SID"
-else
-  echo "$INPUT"
+ti = d.get('tool_input', {})
+ti['_session_id'] = sys.argv[1]
+print(json.dumps({
+  'hookSpecificOutput': {
+    'hookEventName': 'PreToolUse',
+    'permissionDecision': 'allow',
+    'updatedInput': ti
+  }
+}))
+" "$SID")
+  echo "$UPDATED"
 fi
+exit 0
