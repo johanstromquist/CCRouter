@@ -51,16 +51,13 @@ function activate(context) {
             JSON.parse(body);
 
           if (session_id) {
-            // Try to find which terminal this session is in
+            // Map session to terminal. PID matching confirms which terminal
+            // in this window. If PID matching fails but we only have one
+            // terminal, map to it (the daemon targeted this specific bridge).
             let terminalPid = await findTerminalPidForSession(pid);
-
-            // If PID matching fails (common on Windows where process tree
-            // walking is slow/unreliable), map to the first available terminal.
-            // The daemon already verified this bridge serves this session.
-            if (!terminalPid && vscode.window.terminals.length > 0) {
+            if (!terminalPid && vscode.window.terminals.length === 1) {
               terminalPid = await vscode.window.terminals[0].processId;
             }
-
             if (terminalPid) {
               sessionTerminalMap.set(session_id, terminalPid);
               persistSession(cwd, session_id, friendly_name);

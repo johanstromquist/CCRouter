@@ -31,7 +31,7 @@ import {
   createPendingAck,
 } from "./db.js";
 import { readTranscript, formatTranscript } from "./transcript.js";
-import { pushToTerminal, notifyBridges } from "./bridge.js";
+import { pushToTerminal, pushToSessionBridge, notifyBridge } from "./bridge.js";
 import { createLogger } from "./logger.js";
 import { SSE_PORT, MCP_HOST, ADVERTISE_IP, DAEMON_PORT } from "./config.js";
 import type { Session } from "./types.js";
@@ -40,6 +40,14 @@ const log = createLogger("mcp");
 
 /** Push a message to a session's terminal using all available routing info */
 async function pushToSession(session: Session, text: string) {
+  // Route directly to the bridge on the session's source IP
+  if (session.source_ip) {
+    return pushToSessionBridge(session.source_ip, text, {
+      session_id: session.session_id,
+      pid: session.pid || undefined,
+    });
+  }
+  // Fallback for sessions without source_ip
   return pushToTerminal(text, {
     session_id: session.session_id,
     pid: session.pid || undefined,
@@ -113,13 +121,15 @@ server.tool(
 
     bindSession(session.session_id);
 
-    // Notify bridges so they can map session_id to terminal
-    notifyBridges({
-      session_id: session.session_id,
-      friendly_name: session.friendly_name,
-      cwd: session.cwd || params.cwd,
-      pid: session.pid || params.pid,
-    });
+    // Notify the bridge on the session's IP
+    if (session.source_ip) {
+      notifyBridge(session.source_ip, {
+        session_id: session.session_id,
+        friendly_name: session.friendly_name,
+        cwd: session.cwd || params.cwd,
+        pid: session.pid || params.pid,
+      });
+    }
 
     return {
       content: [
@@ -307,10 +317,10 @@ server.tool(
     if (result === true) {
       currentSessionName = params.name;
 
-      // Notify bridges so they persist the new name for crash recovery
+      // Notify the bridge on the session's IP
       const session = getSessionById(id);
-      if (session) {
-        notifyBridges({
+      if (session?.source_ip) {
+        notifyBridge(session.source_ip, {
           session_id: session.session_id,
           friendly_name: params.name,
           cwd: session.cwd || undefined,

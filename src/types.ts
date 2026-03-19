@@ -10,6 +10,7 @@ export interface Session {
   last_seen_at: string;
   is_active: number; // 0 or 1
   name_custom?: number; // 1 if the name was explicitly set by user or inherited from a custom-named predecessor
+  source_ip?: string; // IP address of the machine that registered this session
 }
 
 export function isSessionActive(s: Session): boolean {

@@ -23,7 +23,8 @@ const migrations: Migration[] = [
           registered_at TEXT NOT NULL,
           last_seen_at TEXT NOT NULL,
           is_active INTEGER DEFAULT 1,
-          name_custom INTEGER DEFAULT 0
+          name_custom INTEGER DEFAULT 0,
+          source_ip TEXT
         );
 
         CREATE TABLE IF NOT EXISTS messages (

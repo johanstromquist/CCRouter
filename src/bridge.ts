@@ -157,11 +157,11 @@ export function isBridgeAvailable(): boolean {
 }
 
 /**
- * Notify all bridge instances about a session registration or rename.
- * This allows the Cursor extension to persist session mappings
- * for crash recovery (claude-r).
+ * Notify the bridge on a specific IP about a session registration.
+ * Only the bridge serving sessions from this IP gets notified.
+ * No broadcasting -- direct routing by IP.
  */
-export function notifyBridges(session: {
+export function notifyBridge(targetIp: string, session: {
   session_id: string;
   friendly_name: string;
   cwd?: string;
@@ -175,10 +175,20 @@ export function notifyBridges(session: {
     pid: session.pid || null,
   });
 
+  // Normalize: local requests (127.0.0.1, ::1) match local bridges (no host or 127.0.0.1 or 0.0.0.0)
+  const isLocal = targetIp === "127.0.0.1" || targetIp === "::1" || targetIp === "0.0.0.0";
+
   for (const bridge of bridges) {
+    const bridgeIsLocal = !bridge.host || bridge.host === "127.0.0.1" || bridge.host === "0.0.0.0";
+    const bridgeIp = bridge.host || "127.0.0.1";
+
+    // Match: local session -> local bridges, remote session -> bridge on same IP
+    const matches = isLocal ? bridgeIsLocal : bridgeIp === targetIp;
+    if (!matches) continue;
+
     const req = http.request(
       {
-        hostname: bridge.host || DEFAULT_BRIDGE_HOST,
+        hostname: bridgeIp === "0.0.0.0" ? "127.0.0.1" : bridgeIp,
         port: bridge.port,
         path: "/notify",
         method: "POST",
@@ -200,4 +210,31 @@ export function notifyBridges(session: {
     req.write(payload);
     req.end();
   }
+}
+
+/**
+ * Push a message to a specific IP's bridge.
+ * Used for targeted delivery when we know the session's source IP.
+ */
+export async function pushToSessionBridge(
+  targetIp: string,
+  text: string,
+  routing: { session_id?: string; pid?: number }
+): Promise<BridgeResponse | null> {
+  const bridges = discoverBridges();
+  const isLocal = targetIp === "127.0.0.1" || targetIp === "::1" || targetIp === "0.0.0.0";
+
+  for (const bridge of bridges) {
+    const bridgeIsLocal = !bridge.host || bridge.host === "127.0.0.1" || bridge.host === "0.0.0.0";
+    const bridgeIp = bridge.host || "127.0.0.1";
+    const matches = isLocal ? bridgeIsLocal : bridgeIp === targetIp;
+    if (!matches) continue;
+
+    const result = await sendToBridge(bridge.port, text, routing,
+      bridgeIp === "0.0.0.0" ? "127.0.0.1" : bridgeIp);
+    if (result?.ok) return result;
+  }
+
+  // Fallback: try all bridges (in case source_ip isn't set yet)
+  return pushToTerminal(text, routing);
 }

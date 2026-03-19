@@ -17,7 +17,7 @@ import {
   cleanupOldAcks,
   resolveSession,
 } from "./db.js";
-import { pushToTerminal, notifyBridges } from "./bridge.js";
+import { pushToTerminal, pushToSessionBridge, notifyBridge } from "./bridge.js";
 import { scanLockFiles, isProcessAlive } from "./lock-scanner.js";
 import { createLogger } from "./logger.js";
 import {
@@ -56,10 +56,20 @@ async function handleRegister(req: IncomingMessage, res: ServerResponse) {
     json(res, 400, { error: "session_id required" });
     return;
   }
+
+  // Capture source IP -- used to route push delivery to the correct bridge.
+  // Every machine is just an IP. No local vs remote distinction.
+  const sourceIp = (req.socket.remoteAddress || "127.0.0.1").replace(/^::ffff:/, "");
+
   const session = registerSession(body);
 
-  // Notify bridges so they can persist the session mapping and build terminal maps
-  notifyBridges({
+  // Store source IP for push routing
+  const db = getDb();
+  db.prepare("UPDATE sessions SET source_ip = ? WHERE session_id = ?")
+    .run(sourceIp, session.session_id);
+
+  // Notify only the bridge on the same IP (not all bridges)
+  notifyBridge(sourceIp, {
     session_id: session.session_id,
     friendly_name: session.friendly_name,
     cwd: session.cwd || body.cwd,
@@ -179,21 +189,26 @@ async function retryUnackedMessages() {
   const unacked = getUnackedMessages(ACK_TIMEOUT_SECONDS);
 
   for (const pending of unacked) {
-    // Resolve target session for routing info
     const targetSession = resolveSession(pending.target_name);
-    const routing = {
-      session_id: targetSession?.session_id,
-      pid: targetSession?.pid || undefined,
-    };
+    if (!targetSession) continue;
+
+    const push = targetSession.source_ip
+      ? (text: string) => pushToSessionBridge(targetSession.source_ip!, text, {
+          session_id: targetSession.session_id,
+          pid: targetSession.pid || undefined,
+        })
+      : (text: string) => pushToTerminal(text, {
+          session_id: targetSession.session_id,
+          pid: targetSession.pid || undefined,
+        });
 
     if (pending.retry_count === 0) {
       log.info(`Nudging ${pending.target_name} (Enter) for message ${pending.message_id} in ${pending.channel}`);
-      await pushToTerminal("", routing);
+      await push("");
       incrementRetry(pending.id);
     } else if (pending.retry_count === 1) {
       log.info(`Prodding ${pending.target_name} for message ${pending.message_id} in ${pending.channel}`);
-      const nudge = `[${pending.channel}] ${pending.sender_name}: Did you receive my recent message?`;
-      await pushToTerminal(nudge, routing);
+      await push(`[${pending.channel}] ${pending.sender_name}: Did you receive my recent message?`);
       incrementRetry(pending.id);
     } else {
       log.warn(`Delivery failed for message ${pending.message_id} to ${pending.target_name} -- notifying ${pending.sender_name}`);
@@ -202,10 +217,17 @@ async function retryUnackedMessages() {
       const sender = resolveSession(pending.sender_name);
       if (sender) {
         const notice = `[CCRouter] Message delivery to "${pending.target_name}" in ${pending.channel} was not acknowledged after retries. The agent may be unresponsive.`;
-        await pushToTerminal(notice, {
-          session_id: sender.session_id,
-          pid: sender.pid || undefined,
-        });
+        if (sender.source_ip) {
+          await pushToSessionBridge(sender.source_ip, notice, {
+            session_id: sender.session_id,
+            pid: sender.pid || undefined,
+          });
+        } else {
+          await pushToTerminal(notice, {
+            session_id: sender.session_id,
+            pid: sender.pid || undefined,
+          });
+        }
       }
     }
   }
