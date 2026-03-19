@@ -5,7 +5,8 @@ try {
     $sessionJson = [Console]::In.ReadToEnd()
     $session = $sessionJson | ConvertFrom-Json
     $sessionId = $session.session_id
-    $cwd = $session.cwd
+    # Normalize path separators so cwd hashes match across sessions
+    $cwd = ($session.cwd -replace '\\', '/')
 
     if (-not $sessionId) { exit 0 }
 

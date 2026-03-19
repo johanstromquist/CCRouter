@@ -127,6 +127,10 @@ export function registerSession(opts: {
 }): Session {
   const db = getDb();
 
+  // Normalize Windows paths (backslash -> forward slash) so cwd matching
+  // works regardless of which path separator the hook or CC uses.
+  const normalizedCwd = opts.cwd?.replace(/\\/g, "/");
+
   const result = db.transaction(() => {
     const now = new Date().toISOString();
 
@@ -142,7 +146,7 @@ export function registerSession(opts: {
       if (ttySession) {
         db.prepare(
           "UPDATE sessions SET last_seen_at = ?, pid = COALESCE(?, pid), cwd = COALESCE(?, cwd) WHERE session_id = ?"
-        ).run(now, opts.pid ?? null, opts.cwd ?? null, ttySession.session_id);
+        ).run(now, opts.pid ?? null, normalizedCwd ?? null, ttySession.session_id);
         return ttySession;
       }
     }
@@ -163,7 +167,7 @@ export function registerSession(opts: {
         now,
         opts.pid ?? null,
         opts.tty ?? null,
-        opts.cwd ?? null,
+        normalizedCwd ?? null,
         opts.workspace_folders ? JSON.stringify(opts.workspace_folders) : null,
         opts.ide_name ?? null,
         opts.lock_port ?? null,
@@ -233,7 +237,7 @@ export function registerSession(opts: {
     }
 
     // 2. CWD match (fallback -- clean up stale sessions, inherit name)
-    if (!friendlyName && opts.cwd) {
+    if (!friendlyName && normalizedCwd) {
       // Clean up active sessions in this cwd with dead PIDs
       const activeSameCwd = db
         .prepare(
@@ -241,7 +245,7 @@ export function registerSession(opts: {
            WHERE cwd = ? AND is_active = 1 AND session_id != ?
            ORDER BY last_seen_at DESC`
         )
-        .all(opts.cwd, opts.session_id) as Session[];
+        .all(normalizedCwd, opts.session_id) as Session[];
 
       for (const candidate of activeSameCwd) {
         if (candidate.pid && !isProcessAlive(candidate.pid)) {
@@ -267,7 +271,7 @@ export function registerSession(opts: {
                AND last_seen_at > datetime('now', '-24 hours')
                ORDER BY name_custom DESC, last_seen_at DESC`
           )
-          .all(opts.cwd, opts.session_id) as Session[];
+          .all(normalizedCwd, opts.session_id) as Session[];
 
         if (candidates.length === 1) {
           friendlyName = candidates[0].friendly_name;
@@ -279,7 +283,7 @@ export function registerSession(opts: {
           );
         } else if (candidates.length > 1) {
           console.log(
-            `[db] Ambiguous cwd match for ${opts.cwd}: ${candidates.length} inactive candidates, skipping re-identification`
+            `[db] Ambiguous cwd match for ${normalizedCwd}: ${candidates.length} inactive candidates, skipping re-identification`
           );
         }
       }
@@ -305,7 +309,7 @@ export function registerSession(opts: {
       friendlyName,
       opts.pid ?? null,
       opts.tty ?? null,
-      opts.cwd ?? null,
+      normalizedCwd ?? null,
       opts.workspace_folders ? JSON.stringify(opts.workspace_folders) : null,
       opts.ide_name ?? null,
       opts.lock_port ?? null,
