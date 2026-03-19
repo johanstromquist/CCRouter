@@ -5,6 +5,16 @@
 
 set -euo pipefail
 
+# Read daemon URL from config (default: localhost)
+DAEMON_URL="http://127.0.0.1:19919"
+CONFIG_FILE="$HOME/.ccrouter/config.json"
+if [ -f "$CONFIG_FILE" ]; then
+  CONFIGURED_URL=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('daemonUrl',''))" "$CONFIG_FILE" 2>/dev/null || echo "")
+  if [ -n "$CONFIGURED_URL" ]; then
+    DAEMON_URL="$CONFIGURED_URL"
+  fi
+fi
+
 # Read the hook JSON from stdin
 INPUT=$(cat)
 
@@ -23,24 +33,14 @@ if [[ "$PROMPT" =~ ^\[(\#[a-zA-Z0-9_-]+)\]\ ([a-zA-Z0-9_-]+):\ .+ ]]; then
   CHANNEL="${BASH_REMATCH[1]}"
   SENDER="${BASH_REMATCH[2]}"
 
-  # Find our tty by walking the process tree
-  MY_TTY=""
-  WALK_PID=$$
-  for i in 1 2 3 4 5 6; do
-    WALK_PID=$(ps -o ppid= -p "$WALK_PID" 2>/dev/null | tr -d ' ' || echo "")
-    if [ -z "$WALK_PID" ] || [ "$WALK_PID" = "1" ]; then break; fi
-    WALK_TTY=$(ps -o tty= -p "$WALK_PID" 2>/dev/null | tr -d ' ' || echo "")
-    if [ -n "$WALK_TTY" ] && [ "$WALK_TTY" != "??" ]; then
-      MY_TTY="$WALK_TTY"
-      break
-    fi
-  done
+  # Read session_id from file (consistent with PowerShell hook)
+  SESSION_ID=$(cat "$HOME/.ccrouter/session_id" 2>/dev/null || echo "")
 
-  if [ -n "$MY_TTY" ]; then
+  if [ -n "$SESSION_ID" ]; then
     # Fire-and-forget ack to daemon
-    curl -s -X POST "http://127.0.0.1:19919/ack" \
+    curl -s -X POST "$DAEMON_URL/ack" \
       -H "Content-Type: application/json" \
-      -d "{\"channel\":\"$CHANNEL\",\"sender\":\"$SENDER\",\"tty\":\"$MY_TTY\"}" \
+      -d "{\"channel\":\"$CHANNEL\",\"sender\":\"$SENDER\",\"session_id\":\"$SESSION_ID\"}" \
       --connect-timeout 1 --max-time 2 > /dev/null 2>&1 || true
   fi
 fi
