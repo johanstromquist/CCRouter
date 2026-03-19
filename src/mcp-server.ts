@@ -32,9 +32,8 @@ import {
 } from "./db.js";
 import { readTranscript, formatTranscript } from "./transcript.js";
 import { pushToTerminal, notifyBridges } from "./bridge.js";
-// session.ts no longer exports resolveCurrentSession -- all sessions use register_self
 import { createLogger } from "./logger.js";
-import { SSE_PORT, ADVERTISE_IP, DAEMON_PORT } from "./config.js";
+import { SSE_PORT, MCP_HOST, ADVERTISE_IP, DAEMON_PORT } from "./config.js";
 import type { Session } from "./types.js";
 
 const log = createLogger("mcp");
@@ -75,7 +74,7 @@ const server = new McpServer({
   version: "2.0.0",
 });
 
-// --- register_self: fallback if hook didn't set env var ---
+// --- register_self: fallback if /bind didn't fire ---
 server.tool(
   "register_self",
   "Register this session with CCRouter (use if session-start hook did not register automatically)",
@@ -817,7 +816,6 @@ return {
 // --- Start server ---
 async function main() {
   // All sessions (local + remote) connect via SSE. No stdio mode.
-  const SSE_HOST = process.env.CCROUTER_MCP_HOST || "0.0.0.0";
 
     // Track active SSE transports and their server instances
     const transports = new Map<string, SSEServerTransport>();
@@ -941,8 +939,8 @@ async function main() {
       }
     });
 
-    httpServer.listen(SSE_PORT, SSE_HOST, () => {
-      log.info(`MCP server (SSE) listening on http://${SSE_HOST}:${SSE_PORT}`);
+    httpServer.listen(SSE_PORT, MCP_HOST, () => {
+      log.info(`MCP server (SSE) listening on http://${MCP_HOST}:${SSE_PORT}`);
       log.info(`Remote CC: claude mcp add ccrouter --transport sse --url http://<this-ip>:${SSE_PORT}/sse`);
     });
 }

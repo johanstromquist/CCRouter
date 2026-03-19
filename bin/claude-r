@@ -88,17 +88,6 @@ if [ "$COUNT" = "0" ]; then
   exit 1
 fi
 
-# Function to check if a session is already active in the daemon
-is_session_active() {
-  local sid="$1"
-  local result
-  result=$(curl -s "$DAEMON_URL/session/$sid" --connect-timeout 1 2>/dev/null || echo "")
-  if echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('is_active')==1 else 1)" 2>/dev/null; then
-    return 0  # active
-  fi
-  return 1  # not active
-}
-
 # Handle flags
 case "${1:-}" in
   --list)

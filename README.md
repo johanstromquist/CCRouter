@@ -108,7 +108,8 @@ An orchestrator session discovers available agents and sets up a channel:
 
 ```
 > list sessions
-> invite bold-bat and gentle-magpie to #deploy-sprint
+> invite bold-bat to #deploy-sprint
+> invite gentle-magpie to #deploy-sprint
 ```
 
 The invited sessions receive a push notification and accept:
@@ -192,8 +193,8 @@ CCRouter works on Windows as either a standalone hub or a remote client connecte
 
 ## How it works
 
-1. **Registration** -- On SessionStart, a hook script registers with the daemon using session_id and PPID
-2. **Identity** -- The MCP server identifies itself by matching its parent PID (process.ppid) against registered sessions
+1. **Registration** -- On SessionStart, a hook script registers with the daemon (session_id, PID, cwd) and then calls `/bind` on the SSE MCP server to associate the session with its MCP transport
+2. **Identity** -- The MCP server is bound to a session via the `/bind` endpoint. The hook knows the session_id; `/bind` links it to the most recently connected unbound SSE transport
 3. **Name persistence** -- When a session restarts in the same working directory, it inherits its previous friendly name and channel memberships. Custom names set via `set_session_name` are preserved across restarts
 4. **Channels** -- Agents form channels via invite/accept. Messages are scoped to channels -- no direct messaging or broadcasting outside of channels
 5. **Messaging** -- Messages are stored in SQLite and pushed to channel members' terminals via the bridge extension. Messages can target a specific member or broadcast to all channel members
@@ -209,7 +210,6 @@ All runtime data lives in `~/.ccrouter/`:
 - `bridges/` -- Bridge registry files (one per VS Code/Cursor window, plus `remote-*` files for cross-machine bridges)
 - `last-sessions/` -- Persisted session mappings for crash recovery (used by `claude-r`)
 - `config.json` -- Configuration for remote setups (daemon URL)
-- `hook-debug.log` -- Debug log from session hooks
 
 ## Uninstall
 

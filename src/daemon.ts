@@ -222,7 +222,7 @@ function syncLockFiles() {
   const locks = scanLockFiles();
 
   // Touch sessions that have active lock files
-  for (const [_key, info] of locks) {
+  for (const [, info] of locks) {
     const sessions = getActiveSessions();
     for (const session of sessions) {
       if (session.pid === info.pid || session.lock_port === info.port) {

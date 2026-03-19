@@ -2,7 +2,10 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { BRIDGES_DIR, BRIDGE_TIMEOUT } from "./config.js";
+import { createLogger } from "./logger.js";
 import type { BridgeRegistry } from "./types.js";
+
+const log = createLogger("bridge");
 
 const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 
@@ -108,11 +111,11 @@ function sendToBridge(
     );
 
     req.on("error", (err: Error) => {
-      console.error("[bridge] request failed:", err.message);
+      log.warn("Request failed", { error: err.message });
       resolve(null);
     });
     req.on("timeout", () => {
-      console.error("[bridge] request timed out to port", port);
+      log.warn("Request timed out", { port });
       req.destroy();
       resolve(null);
     });
@@ -188,10 +191,10 @@ export function notifyBridges(session: {
       () => {} // fire and forget
     );
     req.on("error", (err: Error) => {
-      console.error("[bridge] notification failed to port", bridge.port + ":", err.message);
+      log.warn("Notification failed", { port: bridge.port, error: err.message });
     });
     req.on("timeout", () => {
-      console.error("[bridge] notification timed out to port", bridge.port);
+      log.warn("Notification timed out", { port: bridge.port });
       req.destroy();
     });
     req.write(payload);

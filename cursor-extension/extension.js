@@ -17,7 +17,7 @@ let server = null;
 let registryFile = null;
 
 // In-memory maps for terminal identification
-// sessionId -> terminal processId (set via /notify from daemon)
+// sessionId -> terminal processId, populated by /notify when daemon reports session registration
 const sessionTerminalMap = new Map();
 
 function activate(context) {

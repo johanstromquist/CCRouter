@@ -21,21 +21,16 @@ SESSION_JSON=$(cat)
 # Extract session_id and cwd from the JSON (pid is not provided by CC)
 SESSION_ID=$(echo "$SESSION_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null || echo "")
 CWD=$(echo "$SESSION_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('cwd',''))" 2>/dev/null || echo "")
+# Normalize path separators so cwd hashes match across platforms
+CWD="${CWD//\\//}"
 
 # The CC process PID is our direct parent (PPID).
-# The MCP server is also a child of CC, so it shares the same PPID.
-# This is used to link the MCP to its session in the daemon DB.
+# Used for PID liveness checking during stale session cleanup.
 CC_PID="$PPID"
 
 if [ -z "$SESSION_ID" ]; then
   exit 0
 fi
-
-# desired_name is intentionally NOT read from last-sessions here.
-# In multi-terminal workspaces, all terminals share the same cwd hash,
-# so reading sessions[0] would give every terminal the same name.
-# Use 'claude-r' for named session recovery instead.
-DESIRED_NAME=""
 
 # Build registration payload (using sys.argv to prevent code injection)
 PAYLOAD=$(python3 -c "

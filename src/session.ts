@@ -128,6 +128,3 @@ export function resolveSessionName(
   return { name: friendlyName, isCustom: nameIsCustom };
 }
 
-// No resolveCurrentSession needed -- all sessions connect via SSE and
-// identify themselves via register_self. The hook registers with the daemon,
-// CC calls register_self on the MCP to sync identity. Same flow everywhere.

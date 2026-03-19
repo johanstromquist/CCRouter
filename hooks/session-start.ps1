@@ -20,7 +20,7 @@ try {
     }
 
     # The CC process PID is our direct parent.
-    # The MCP server is also a child of CC, sharing the same parent PID.
+    # Used for PID liveness checking during stale session cleanup.
     $ccPid = (Get-Process -Id $PID).Parent.Id
 
     # Build payload
