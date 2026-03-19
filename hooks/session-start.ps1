@@ -1,5 +1,5 @@
 # CCRouter session-start hook (Windows/PowerShell)
-# Registers with the CCRouter daemon and persists session ID to file.
+# Registers with the CCRouter daemon.
 # Called by Claude Code on SessionStart event.
 try {
     $sessionJson = [Console]::In.ReadToEnd()
@@ -19,31 +19,21 @@ try {
         if ($config.daemonUrl) { $daemonUrl = $config.daemonUrl }
     }
 
-    # desired_name is intentionally NOT read from last-sessions here.
-    # In multi-terminal workspaces, all terminals share the same cwd hash,
-    # so reading sessions[0] would give every terminal the same name.
-    # Use 'claude-r' for named session recovery instead.
-    $desiredName = $null
+    # The CC process PID is our direct parent.
+    # The MCP server is also a child of CC, sharing the same parent PID.
+    $ccPid = (Get-Process -Id $PID).Parent.Id
 
-    # Build payload (no tty on Windows)
+    # Build payload
     $payload = @{
         session_id = $sessionId
         cwd = $cwd
-        pid = $PID
-    }
-    if ($desiredName) {
-        $payload.desired_name = $desiredName
-    }
-    $payloadJson = $payload | ConvertTo-Json
+        pid = $ccPid
+    } | ConvertTo-Json
 
     # Register with daemon
     $response = Invoke-RestMethod -Uri "$daemonUrl/register" `
-        -Method Post -Body $payloadJson -ContentType "application/json" `
+        -Method Post -Body $payload -ContentType "application/json" `
         -TimeoutSec 5 -ErrorAction Stop
-
-    # Persist session ID to file (env vars don't propagate to MCP on Windows)
-    New-Item -ItemType Directory -Force -Path $ccrouterDir | Out-Null
-    $sessionId | Set-Content (Join-Path $ccrouterDir "session_id") -NoNewline
 
     $name = $response.friendly_name
     Write-Host "[CCRouter] Session registered as `"$name`". You can use CCRouter tools to communicate with other sessions."

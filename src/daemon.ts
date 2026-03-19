@@ -266,6 +266,24 @@ const httpServer = createServer(async (req, res) => {
       await handleAck(req, res);
     } else if (req.method === "POST" && url.pathname === "/register-bridge") {
       await handleRegisterBridge(req, res);
+    } else if (
+      req.method === "GET" &&
+      url.pathname.startsWith("/session-by-pid/")
+    ) {
+      const pid = parseInt(url.pathname.slice("/session-by-pid/".length), 10);
+      if (!pid) {
+        json(res, 400, { error: "invalid pid" });
+      } else {
+        const db = getDb();
+        const session = db
+          .prepare("SELECT * FROM sessions WHERE pid = ? AND is_active = 1 ORDER BY last_seen_at DESC LIMIT 1")
+          .get(pid) as Session | undefined;
+        if (session) {
+          json(res, 200, session);
+        } else {
+          json(res, 404, { error: "no active session for pid" });
+        }
+      }
     } else if (req.method === "GET" && url.pathname === "/health") {
       handleHealth(req, res);
     } else if (

@@ -1,6 +1,4 @@
 import { execSync } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
 import Database from "better-sqlite3";
 import type { Session } from "./types.js";
 import { generateName } from "./names.js";
@@ -184,70 +182,35 @@ export function resolveSessionName(
 
 /**
  * Canonical "who am I" for the MCP server.
- * Resolution order:
- *   1. CCROUTER_SESSION_ID env var
- *   2. session_id file (~/.ccrouter/session_id)
- *   3. Process tree TTY match (Unix only)
- *   4. Throws if nothing works
+ *
+ * Queries the daemon for the session registered with this CC instance's PID.
+ * The session-start hook registers with the daemon including the CC process PID.
+ * The MCP server is a child of CC, so process.ppid gives the CC PID.
+ * The daemon looks up: WHERE pid = ppid AND is_active = 1.
+ *
+ * Platform-agnostic: process.ppid works on Mac, Linux, and Windows.
+ * No TTY, no env vars, no shared files.
+ *
+ * Fallback: register_self (called explicitly by the user or by CC).
  */
 export function resolveCurrentSession(
   db: Database.Database
 ): { id: string; name: string } {
-  // 1. Env var
-  const envId = process.env.CCROUTER_SESSION_ID || null;
-  if (envId) {
-    const s = db
-      .prepare("SELECT * FROM sessions WHERE session_id = ?")
-      .get(envId) as Session | undefined;
-    if (s) {
-      db.prepare("UPDATE sessions SET last_seen_at = ? WHERE session_id = ?").run(
-        new Date().toISOString(),
-        envId
-      );
-      return { id: envId, name: s.friendly_name };
-    }
-  }
+  const ppid = process.ppid;
 
-  // 2. session_id file (Windows hooks write here since env vars
-  //    don't propagate to the MCP server subprocess)
-  const sidFile = path.join(
-    process.env.HOME || process.env.USERPROFILE || "",
-    ".ccrouter",
-    "session_id"
-  );
-  try {
-    const fileId = fs.readFileSync(sidFile, "utf-8").trim();
-    if (fileId) {
-      const s = db
-        .prepare("SELECT * FROM sessions WHERE session_id = ?")
-        .get(fileId) as Session | undefined;
-      if (s) {
-        db.prepare("UPDATE sessions SET last_seen_at = ? WHERE session_id = ?").run(
-          new Date().toISOString(),
-          fileId
-        );
-        return { id: fileId, name: s.friendly_name };
-      }
-    }
-  } catch {
-    // No file -- fall through
-  }
+  // Query daemon by parent PID
+  const s = db
+    .prepare(
+      "SELECT * FROM sessions WHERE pid = ? AND is_active = 1 ORDER BY last_seen_at DESC LIMIT 1"
+    )
+    .get(ppid) as Session | undefined;
 
-  // 3. Process tree TTY match (Unix only)
-  const tty = findTtyByProcessTree(process.pid);
-  if (tty) {
-    const s = db
-      .prepare(
-        "SELECT * FROM sessions WHERE tty = ? AND is_active = 1 ORDER BY last_seen_at DESC LIMIT 1"
-      )
-      .get(tty) as Session | undefined;
-    if (s) {
-      db.prepare("UPDATE sessions SET last_seen_at = ? WHERE session_id = ?").run(
-        new Date().toISOString(),
-        s.session_id
-      );
-      return { id: s.session_id, name: s.friendly_name };
-    }
+  if (s) {
+    db.prepare("UPDATE sessions SET last_seen_at = ? WHERE session_id = ?").run(
+      new Date().toISOString(),
+      s.session_id
+    );
+    return { id: s.session_id, name: s.friendly_name };
   }
 
   throw new Error(
