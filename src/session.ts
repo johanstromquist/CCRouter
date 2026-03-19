@@ -128,41 +128,6 @@ export function resolveSessionName(
   return { name: friendlyName, isCustom: nameIsCustom };
 }
 
-/**
- * Canonical "who am I" for the MCP server.
- *
- * Queries the daemon for the session registered with this CC instance's PID.
- * The session-start hook registers with the daemon including the CC process PID.
- * The MCP server is a child of CC, so process.ppid gives the CC PID.
- * The daemon looks up: WHERE pid = ppid AND is_active = 1.
- *
- * Platform-agnostic: process.ppid works on Mac, Linux, and Windows.
- * No env vars, no shared files.
- *
- * Fallback: register_self (called explicitly by the user or by CC).
- */
-export function resolveCurrentSession(
-  db: Database.Database
-): { id: string; name: string } {
-  const ppid = process.ppid;
-
-  // Query daemon by parent PID
-  const s = db
-    .prepare(
-      "SELECT * FROM sessions WHERE pid = ? AND is_active = 1 ORDER BY last_seen_at DESC LIMIT 1"
-    )
-    .get(ppid) as Session | undefined;
-
-  if (s) {
-    db.prepare("UPDATE sessions SET last_seen_at = ? WHERE session_id = ?").run(
-      new Date().toISOString(),
-      s.session_id
-    );
-    return { id: s.session_id, name: s.friendly_name };
-  }
-
-  throw new Error(
-    "Session not registered. The session-start hook should have registered this session. " +
-      "If not, call register_self with your session_id."
-  );
-}
+// No resolveCurrentSession needed -- all sessions connect via SSE and
+// identify themselves via register_self. The hook registers with the daemon,
+// CC calls register_self on the MCP to sync identity. Same flow everywhere.

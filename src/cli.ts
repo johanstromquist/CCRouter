@@ -108,7 +108,10 @@ function installDependencies() {
 }
 
 function configureMcp() {
-  const mcpServerPath = join(APP_DIR, "dist", "mcp-server.js");
+  // All sessions (local and remote) connect to the SSE MCP server.
+  // This gives a unified transport -- no stdio vs SSE split, no PPID tricks.
+  // Local sessions use 127.0.0.1, remote sessions use the LAN IP.
+  const sseUrl = "http://127.0.0.1:19920/sse";
 
   // Remove existing entry
   try {
@@ -118,7 +121,7 @@ function configureMcp() {
   }
 
   execSync(
-    `claude mcp add --transport stdio --scope user ccrouter -- node "${mcpServerPath}"`,
+    `claude mcp add --transport sse --scope user ccrouter --url "${sseUrl}"`,
     { stdio: ["pipe", "pipe", "pipe"] }
   );
 }

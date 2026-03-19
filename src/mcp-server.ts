@@ -1,8 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { createServer as createHttpServer } from "node:http";
-import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +13,7 @@ import {
   getActiveSessions,
   resolveSession,
   updateSessionName,
+  touchSession,
   getSessionById,
   getDb,
   joinChannel,
@@ -33,7 +32,7 @@ import {
 } from "./db.js";
 import { readTranscript, formatTranscript } from "./transcript.js";
 import { pushToTerminal, notifyBridges } from "./bridge.js";
-import { resolveCurrentSession } from "./session.js";
+// session.ts no longer exports resolveCurrentSession -- all sessions use register_self
 import { createLogger } from "./logger.js";
 import { SSE_PORT, ADVERTISE_IP, DAEMON_PORT } from "./config.js";
 import type { Session } from "./types.js";
@@ -48,23 +47,22 @@ async function pushToSession(session: Session, text: string) {
   });
 }
 
-// Mutable session identity -- set by register_self and resolved lazily
+// Session identity -- set by register_self. All sessions (local + remote)
+// connect via SSE and identify themselves by calling register_self.
 let currentSessionId: string | null = null;
 let currentSessionName: string | null = null;
 
 function ensureRegistered(): { id: string; name: string } {
-  // If register_self was called in this process, try that first
   if (currentSessionId) {
     const s = getSessionById(currentSessionId);
     if (s) {
+      touchSession(currentSessionId);
       return { id: currentSessionId, name: s.friendly_name };
     }
   }
-  // Delegate to the canonical resolver (env var -> file -> process tree)
-  const resolved = resolveCurrentSession(getDb());
-  currentSessionId = resolved.id;
-  currentSessionName = resolved.name;
-  return resolved;
+  throw new Error(
+    "Session not registered. Call register_self with your session_id."
+  );
 }
 
 const server = new McpServer({
@@ -115,82 +113,37 @@ server.tool(
   "Install CCRouter on this machine. Downloads and installs the Cursor extension for push message delivery. Run this once on any new machine after adding the MCP.",
   {},
   async () => {
-    // In SSE mode, we can serve the VSIX. In stdio mode, it's local.
-    const isSSE = process.argv.includes("--sse");
+    const serverIp = ADVERTISE_IP || "127.0.0.1";
+    const daemonUrl = `http://${serverIp}:${DAEMON_PORT}`;
+    const extensionUrl = `http://${serverIp}:${SSE_PORT}/extension`;
 
-    if (isSSE) {
-      // Remote mode -- CC should download, install, and configure
-      const serverIp = ADVERTISE_IP || "192.168.68.87";
-      const daemonUrl = `http://${serverIp}:${DAEMON_PORT}`;
-      const extensionUrl = `http://${serverIp}:${SSE_PORT}/extension`;
+    const instructions = [
+      "To complete CCRouter setup, run these commands:",
+      "",
+      "1. Download and install the Cursor extension:",
+      `   curl -o ccrouter-bridge.vsix ${extensionUrl}`,
+      `   cursor --install-extension ccrouter-bridge.vsix`,
+      "",
+      "2. Configure the extension to connect to the daemon:",
+      `   Write this JSON to ~/.ccrouter/config.json:`,
+      `   {"daemonUrl": "${daemonUrl}"}`,
+      "",
+      "   On Mac/Linux:",
+      `   mkdir -p ~/.ccrouter && echo '{"daemonUrl":"${daemonUrl}"}' > ~/.ccrouter/config.json`,
+      "",
+      "   On Windows (PowerShell):",
+      `   New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\\.ccrouter" | Out-Null; '{"daemonUrl":"${daemonUrl}"}' | Set-Content "$env:USERPROFILE\\.ccrouter\\config.json"`,
+      "",
+      "3. Reload Cursor (Ctrl+Shift+P > Reload Window)",
+      "",
+      "4. Call register_self with your session_id",
+      "",
+      "After setup, other sessions can push messages directly to your terminal.",
+    ].join("\n");
 
-      // Determine OS-appropriate temp path and config path
-      const instructions = [
-        "To complete CCRouter setup, run these commands:",
-        "",
-        "1. Download and install the Cursor extension:",
-        `   curl -o ccrouter-bridge.vsix ${extensionUrl}`,
-        `   cursor --install-extension ccrouter-bridge.vsix`,
-        "",
-        "2. Configure the extension to connect to the daemon:",
-        `   Write this JSON to ~/.ccrouter/config.json:`,
-        `   {"daemonUrl": "${daemonUrl}"}`,
-        "",
-        "   On Mac/Linux:",
-        `   mkdir -p ~/.ccrouter && echo '{"daemonUrl":"${daemonUrl}"}' > ~/.ccrouter/config.json`,
-        "",
-        "   On Windows (PowerShell):",
-        `   New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\\.ccrouter" | Out-Null; '{"daemonUrl":"${daemonUrl}"}' | Set-Content "$env:USERPROFILE\\.ccrouter\\config.json"`,
-        "",
-        "3. Reload Cursor (Ctrl+Shift+P > Reload Window)",
-        "",
-        "4. Call register_self with your session_id",
-        "",
-        "After setup, other sessions can push messages directly to your terminal.",
-      ].join("\n");
-
-      return {
-        content: [{ type: "text" as const, text: instructions }],
-      };
-    }
-
-    // Local/stdio mode -- install directly
-    const vsixPaths = [
-      path.join(__dirname, "..", "cursor-extension", "ccrouter-terminal-bridge-1.0.0.vsix"),
-      path.join(__dirname, "..", "..", "cursor-extension", "ccrouter-terminal-bridge-1.0.0.vsix"),
-    ];
-    let vsixPath: string | null = null;
-    for (const p of vsixPaths) {
-      try { fs.statSync(p); vsixPath = p; break; } catch {
-        // Expected: VSIX not at this path, try next
-      }
-    }
-
-    if (!vsixPath) {
-      return {
-        content: [{
-          type: "text" as const,
-          text: "VSIX file not found. Build it first: cd cursor-extension && npx @vscode/vsce package --allow-missing-repository",
-        }],
-      };
-    }
-
-    try {
-      execSync(`cursor --install-extension "${vsixPath}"`, { encoding: "utf-8", timeout: 30000 });
-      return {
-        content: [{
-          type: "text" as const,
-          text: "CCRouter Cursor extension installed successfully. Reload Cursor to activate (Ctrl+Shift+P > Reload Window).",
-        }],
-      };
-    } catch (err: any) {
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Extension install failed: ${err.message}\n\nTry manually: cursor --install-extension "${vsixPath}"`,
-        }],
-      };
-    }
+    return {
+      content: [{ type: "text" as const, text: instructions }],
+    };
   }
 );
 
@@ -848,11 +801,8 @@ server.tool(
 
 // --- Start server ---
 async function main() {
-  const mode = process.argv.includes("--sse") ? "sse" : "stdio";
-
-  if (mode === "sse") {
-    // Network mode: SSE transport for remote CC sessions
-    const SSE_HOST = process.env.CCROUTER_MCP_HOST || "0.0.0.0";
+  // All sessions (local + remote) connect via SSE. No stdio mode.
+  const SSE_HOST = process.env.CCROUTER_MCP_HOST || "0.0.0.0";
 
     // Track active SSE transports per session
     const transports = new Map<string, SSEServerTransport>();
@@ -939,11 +889,6 @@ async function main() {
       log.info(`MCP server (SSE) listening on http://${SSE_HOST}:${SSE_PORT}`);
       log.info(`Remote CC: claude mcp add ccrouter --transport sse --url http://<this-ip>:${SSE_PORT}/sse`);
     });
-  } else {
-    // Local mode: stdio transport (default, used by local CC sessions)
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-  }
 }
 
 main().catch((err) => {

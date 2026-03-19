@@ -178,7 +178,6 @@ cat > "$PLIST_DIR/$SSE_PLIST_NAME.plist" << PLIST
     <array>
         <string>$NODE_PATH</string>
         <string>$APP_DIR/dist/mcp-server.js</string>
-        <string>--sse</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$APP_DIR</string>
