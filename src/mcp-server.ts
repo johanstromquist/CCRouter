@@ -85,7 +85,8 @@ function ensureRegistered(): { id: string; name: string } {
     }
   }
   throw new Error(
-    "Session not registered. Call register_self with your session_id."
+    "Session not registered. The session-start hook should have called /bind. " +
+      "If not, call register_self with your session_id."
   );
 }
 
@@ -838,6 +839,13 @@ async function main() {
     const serversByTransport = new Map<string, { setSessionId: (id: string) => void }>();
     const boundTransports = new Set<string>();
 
+    // Pending binds: session_ids that should auto-bind to new transports.
+    // When /bind is called, the session_id is stored here. Any new SSE
+    // connection that arrives after /bind will auto-bind to this session.
+    // This handles the case where CC creates new SSE connections AFTER
+    // the hook's /bind call.
+    const pendingBinds = new Set<string>();
+
     // Load persisted bindings for auto-restore on reconnect
     function loadBindings(): string[] {
       const f = path.join(
@@ -876,26 +884,13 @@ async function main() {
         serversByTransport.set(transport.sessionId, { setSessionId });
         await sessionServer.connect(transport);
 
-        // Auto-bind from persisted bindings (handles MCP server restart).
-        // If a session was previously bound and CC reconnected, bind it again.
-        const persisted = loadBindings();
-        if (persisted.length > 0) {
-          // Try to bind the first persisted session that's still active in daemon
-          for (const sid of persisted) {
-            const s = getSessionById(sid);
-            if (s) {
-              // Reactivate if deactivated (heartbeat timeout during server restart)
-              if (s.is_active === 0) {
-                const db = getDb();
-                db.prepare("UPDATE sessions SET is_active = 1, last_seen_at = ? WHERE session_id = ?")
-                  .run(new Date().toISOString(), sid);
-              }
-              setSessionId(sid);
-              boundTransports.add(transport.sessionId);
-              log.info(`Auto-bound reconnected session ${sid} (${s.friendly_name}) to transport ${transport.sessionId}`);
-              break;
-            }
-          }
+        // If a /bind call already fired (pending bind), apply it immediately.
+        // This handles CC creating new SSE connections after the hook's /bind.
+        if (pendingBinds.size > 0) {
+          const sid = pendingBinds.values().next().value!;
+          setSessionId(sid);
+          boundTransports.add(transport.sessionId);
+          log.info(`Auto-bound new transport ${transport.sessionId} to pending session ${sid}`);
         }
       } else if (req.url === "/bind" && req.method === "POST") {
         // The session-start hook calls this to bind a CC session_id to the
@@ -912,9 +907,10 @@ async function main() {
               return;
             }
 
-            // Bind ALL unbound transports to this session_id.
-            // CC may create multiple SSE connections (e.g., on resume the hook
-            // fires twice). All connections from the same CC serve the same session.
+            // Bind all unbound transports to this session_id.
+            // CC may create multiple SSE connections (hook fires twice on resume).
+            // Each /bind call only binds transports that haven't been bound yet,
+            // so different sessions don't steal each other's transports.
             let boundCount = 0;
             for (const [tid, serverState] of serversByTransport.entries()) {
               if (!boundTransports.has(tid)) {
@@ -925,14 +921,18 @@ async function main() {
               }
             }
 
+            // Store as pending bind so future SSE connections also get bound
+            pendingBinds.add(session_id);
+
             if (boundCount > 0) {
               res.writeHead(200, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ ok: true, bound: boundCount }));
               return;
             }
 
-            res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: false, error: "no unbound transport found" }));
+            // No transports yet -- the bind is pending, will apply on next SSE connect
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, bound: 0, pending: true }));
           } catch (err) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: String(err) }));
