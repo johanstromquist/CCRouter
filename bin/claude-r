@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # claude-r: Resume the last Claude Code session for the current workspace.
 # Reads session info persisted by the CCRouter Cursor extension.
+# Skips sessions that are already active (running in another terminal).
 #
 # Usage:
-#   claude-r           # resume the most recent session in $PWD
-#   claude-r --list    # show all saved sessions for $PWD
+#   claude-r           # resume the next available session
+#   claude-r --list    # show all saved sessions for this workspace
 #   claude-r --pick    # interactive picker for multi-session workspaces
 
 set -euo pipefail
 
 SESSIONS_DIR="${HOME}/.ccrouter/last-sessions"
+DAEMON_URL="http://127.0.0.1:19919"
 
 # Hash the cwd to find the session file
 CWD_HASH=$(echo -n "$PWD" | md5 2>/dev/null || echo -n "$PWD" | md5sum 2>/dev/null | cut -d' ' -f1)
@@ -30,19 +32,52 @@ if [ "$COUNT" = "0" ]; then
   exit 1
 fi
 
+# Get active session IDs from daemon (to skip already-running sessions)
+ACTIVE_SESSIONS=$(curl -s "$DAEMON_URL/health" --connect-timeout 1 2>/dev/null && \
+  python3 -c "
+import json, urllib.request
+try:
+    # Get all active sessions from the daemon
+    req = urllib.request.Request('$DAEMON_URL/health')
+    # We need the session list, not just health. Query the DB via a simple approach:
+    # Read the sessions file and check each against the daemon
+    pass
+except: pass
+" 2>/dev/null || echo "")
+
+# Function to check if a session is already active in the daemon
+is_session_active() {
+  local sid="$1"
+  local result
+  result=$(curl -s "$DAEMON_URL/session/$sid" --connect-timeout 1 2>/dev/null || echo "")
+  if echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('is_active')==1 else 1)" 2>/dev/null; then
+    return 0  # active
+  fi
+  return 1  # not active
+}
+
 # Handle flags
 case "${1:-}" in
   --list)
     echo "Saved sessions for $PWD:"
     echo ""
     echo "$SESSIONS" | python3 -c "
-import sys, json
+import sys, json, urllib.request
+
 sessions = json.load(sys.stdin)
 for i, s in enumerate(sessions):
     name = s.get('friendlyName', 'unknown')
     sid = s.get('sessionId', '?')
     updated = s.get('updatedAt', '?')
-    print(f'  [{i+1}] {name} (session: {sid[:12]}..., last seen: {updated})')
+    # Check if active
+    active = ''
+    try:
+        resp = urllib.request.urlopen('$DAEMON_URL/session/' + sid, timeout=1)
+        data = json.loads(resp.read())
+        if data.get('is_active') == 1:
+            active = ' [ACTIVE]'
+    except: pass
+    print(f'  [{i+1}] {name}{active} (session: {sid[:12]}..., last seen: {updated})')
 "
     exit 0
     ;;
@@ -50,12 +85,20 @@ for i, s in enumerate(sessions):
     echo "Saved sessions for $PWD:"
     echo ""
     echo "$SESSIONS" | python3 -c "
-import sys, json
+import sys, json, urllib.request
+
 sessions = json.load(sys.stdin)
 for i, s in enumerate(sessions):
     name = s.get('friendlyName', 'unknown')
     sid = s.get('sessionId', '?')
-    print(f'  [{i+1}] {name} ({sid[:12]}...)')
+    active = ''
+    try:
+        resp = urllib.request.urlopen('$DAEMON_URL/session/' + sid, timeout=1)
+        data = json.loads(resp.read())
+        if data.get('is_active') == 1:
+            active = ' [ACTIVE]'
+    except: pass
+    print(f'  [{i+1}] {name}{active} ({sid[:12]}...)')
 "
     echo ""
     read -p "Pick a session number: " PICK
@@ -76,18 +119,44 @@ else:
     exec claude --resume "$SESSION_ID"
     ;;
   "")
-    # Default: resume the most recent session
-    SESSION_ID=$(echo "$SESSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['sessionId'])" 2>/dev/null || echo "")
-    FRIENDLY_NAME=$(echo "$SESSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin)[0].get('friendlyName','unknown'))" 2>/dev/null || echo "unknown")
+    # Default: resume the first session that isn't already active
+    RESULT=$(echo "$SESSIONS" | python3 -c "
+import sys, json, urllib.request
 
-    if [ -z "$SESSION_ID" ]; then
-      echo "Could not read session data."
-      exit 1
+sessions = json.load(sys.stdin)
+for s in sessions:
+    sid = s.get('sessionId', '')
+    name = s.get('friendlyName', 'unknown')
+    if not sid:
+        continue
+    # Check if this session is already active
+    try:
+        resp = urllib.request.urlopen('$DAEMON_URL/session/' + sid, timeout=1)
+        data = json.loads(resp.read())
+        if data.get('is_active') == 1:
+            continue  # skip, already running
+    except:
+        pass  # daemon unreachable or session not found -- safe to resume
+    # This session is available
+    print(json.dumps({'sessionId': sid, 'friendlyName': name}))
+    sys.exit(0)
+
+# All sessions are active -- nothing to resume
+print('')
+" 2>/dev/null)
+
+    if [ -z "$RESULT" ]; then
+      echo "All saved sessions for this workspace are already active."
+      echo "Start a new session with 'claude' instead."
+      exit 0
     fi
 
+    SESSION_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['sessionId'])")
+    FRIENDLY_NAME=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['friendlyName'])")
+
     if [ "$COUNT" != "1" ]; then
-      echo "Multiple sessions found for this workspace. Resuming most recent: $FRIENDLY_NAME"
-      echo "(Use 'claude-r --pick' to choose a different one)"
+      echo "Resuming next available session: $FRIENDLY_NAME (skipping active ones)"
+      echo "(Use 'claude-r --pick' to choose a specific one)"
       echo ""
     fi
 
