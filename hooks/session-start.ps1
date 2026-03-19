@@ -37,8 +37,8 @@ try {
 
     $name = $response.friendly_name
 
-    # Bind the MCP server to this session
-    $mcpUrl = "http://127.0.0.1:19920"
+    # Bind the MCP server to this session (derive MCP port from daemon URL)
+    $mcpUrl = $daemonUrl -replace ':19919', ':19920'
     try {
         Invoke-RestMethod -Uri "$mcpUrl/bind" -Method Post `
             -Body (@{session_id=$sessionId} | ConvertTo-Json) `

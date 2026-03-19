@@ -60,7 +60,7 @@ FRIENDLY_NAME=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(
 # Bind the MCP server to this session. The MCP server runs on SSE and doesn't
 # know which CC session it serves. The /bind endpoint matches the most recently
 # connected unbound MCP transport to this session_id.
-MCP_URL="http://127.0.0.1:19920"
+MCP_URL=$(echo "$DAEMON_URL" | sed 's/:19919/:19920/')
 curl -s -X POST "$MCP_URL/bind" \
   -H "Content-Type: application/json" \
   -d "{\"session_id\":\"$SESSION_ID\"}" \
