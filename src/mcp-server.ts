@@ -47,8 +47,13 @@ async function pushToSession(session: Session, text: string) {
   });
 }
 
-// Session identity -- set by register_self. All sessions (local + remote)
-// connect via SSE and identify themselves by calling register_self.
+/**
+ * Create a new MCP server instance with all tools registered.
+ * Each SSE connection gets its own server instance with its own session state.
+ */
+function createMcpServer(): McpServer {
+
+// Per-connection session identity
 let currentSessionId: string | null = null;
 let currentSessionName: string | null = null;
 
@@ -799,6 +804,9 @@ server.tool(
   }
 );
 
+return server;
+} // end createMcpServer
+
 // --- Start server ---
 async function main() {
   // All sessions (local + remote) connect via SSE. No stdio mode.
@@ -820,7 +828,8 @@ async function main() {
       }
 
       if (req.url === "/sse" && req.method === "GET") {
-        // New SSE connection -- each remote CC gets its own transport + server
+        // Each SSE connection gets its own McpServer instance with its own
+        // session state. This supports unlimited concurrent sessions.
         const transport = new SSEServerTransport("/messages", res);
         transports.set(transport.sessionId, transport);
 
@@ -828,14 +837,8 @@ async function main() {
           transports.delete(transport.sessionId);
         };
 
-        // Each connection needs its own McpServer because McpServer
-        // can only be connected to one transport at a time.
-        // We import the tool definitions via the shared `server` setup.
-        // For simplicity, connect the shared server to the latest transport.
-        // This means only one remote session at a time is fully active.
-        // TODO: support multiple concurrent remote sessions
-        await server.connect(transport);
-        // connect() calls start() internally -- do NOT call start() again
+        const sessionServer = createMcpServer();
+        await sessionServer.connect(transport);
       } else if (req.url?.startsWith("/messages") && req.method === "POST") {
         // Route POST to the correct transport by sessionId query param
         const url = new URL(req.url, `http://localhost:${SSE_PORT}`);
