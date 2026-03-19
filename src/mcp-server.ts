@@ -59,7 +59,9 @@ if (!currentSessionId) {
   );
   try {
     currentSessionId = fs.readFileSync(sidFile, "utf-8").trim() || null;
-  } catch {}
+  } catch {
+    // Expected: session_id file may not exist (Mac uses env var instead)
+  }
 }
 
 let currentSessionName: string | null = null;
@@ -88,6 +90,7 @@ function findSessionByProcessTree(): Session | undefined {
         if (session) return session;
       }
     } catch {
+      // Expected: process may have exited during tree walk
       break;
     }
   }
@@ -216,7 +219,9 @@ server.tool(
     ];
     let vsixPath: string | null = null;
     for (const p of vsixPaths) {
-      try { fs.statSync(p); vsixPath = p; break; } catch {}
+      try { fs.statSync(p); vsixPath = p; break; } catch {
+        // Expected: VSIX not at this path, try next
+      }
     }
 
     if (!vsixPath) {
@@ -957,7 +962,9 @@ async function main() {
         ];
         let vsixPath: string | null = null;
         for (const p of vsixPaths) {
-          try { fs.statSync(p); vsixPath = p; break; } catch {}
+          try { fs.statSync(p); vsixPath = p; break; } catch {
+            // Expected: VSIX not at this path, try next
+          }
         }
         if (vsixPath) {
           const data = fs.readFileSync(vsixPath);

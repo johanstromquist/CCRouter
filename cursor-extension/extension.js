@@ -149,7 +149,9 @@ function activate(context) {
       if (registryFile) {
         try {
           fs.unlinkSync(registryFile);
-        } catch {}
+        } catch {
+          // Expected: file may have already been cleaned up
+        }
       }
     },
   });
@@ -166,7 +168,9 @@ function registerWithDaemon(port) {
   try {
     const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     daemonUrl = config.daemonUrl || "";
-  } catch {}
+  } catch {
+    // Expected: config file may not exist (local-only setup)
+  }
   if (!daemonUrl) {
     daemonUrl = vscode.workspace
       .getConfiguration("ccrouter")
@@ -247,7 +251,9 @@ async function findTerminalPidForSession(sessionPid, tty) {
           encoding: "utf-8",
         }).trim();
         if (termTty === tty) return termPid;
-      } catch {}
+      } catch {
+        // Expected: process may have exited between listing and tty lookup
+      }
     }
   }
 
@@ -285,7 +291,9 @@ function isDescendant(parentPid, childPid) {
         currentPid = ppid;
       }
     }
-  } catch {}
+  } catch {
+    // Expected: process may have exited during tree walk
+  }
   return false;
 }
 
@@ -399,6 +407,7 @@ async function findTerminalByTty(tty) {
       }).trim();
       if (termTty === tty) return terminal;
     } catch {
+      // Expected: process may have exited between listing and tty lookup
       continue;
     }
   }
@@ -421,6 +430,7 @@ async function findTerminalByTty(tty) {
         if (childTty === tty) return terminal;
       }
     } catch {
+      // Expected: process may have exited or pgrep found no children
       continue;
     }
   }
@@ -432,22 +442,25 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Persist session info for claude-r
+// Persist session info for claude-r.
+// Each bridge writes its own file keyed by port to avoid race conditions
+// when multiple bridge instances receive /notify for the same session.
 function persistSession(cwd, sessionId, friendlyName, tty) {
   if (!cwd) return;
   const crypto = require("crypto");
   const key = crypto.createHash("md5").update(cwd).digest("hex");
-  const filePath = path.join(SESSIONS_DIR, `${key}.json`);
+  const dirPath = path.join(SESSIONS_DIR, key);
 
-  let sessions = [];
   try {
-    sessions = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    if (!Array.isArray(sessions)) sessions = [];
-  } catch {}
+    fs.mkdirSync(dirPath, { recursive: true });
+  } catch {
+    // Expected: directory may already exist
+  }
 
-  const existing = sessions.findIndex(
-    (s) => s.sessionId === sessionId || s.tty === tty
-  );
+  // Use bridge port as unique identifier for this bridge instance
+  const port = server?.address()?.port || "unknown";
+  const filePath = path.join(dirPath, `${port}.json`);
+
   const entry = {
     sessionId,
     friendlyName,
@@ -456,16 +469,12 @@ function persistSession(cwd, sessionId, friendlyName, tty) {
     updatedAt: new Date().toISOString(),
   };
 
-  if (existing >= 0) {
-    sessions[existing] = entry;
-  } else {
-    sessions.push(entry);
+  // Atomic write: each bridge owns its own file, no race
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(entry, null, 2));
+  } catch (err) {
+    console.error("[bridge] failed to persist session:", err.message);
   }
-
-  sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  sessions = sessions.slice(0, 10);
-
-  fs.writeFileSync(filePath, JSON.stringify(sessions, null, 2));
 }
 
 async function getTerminalMap() {
@@ -478,7 +487,9 @@ async function getTerminalMap() {
         tty = execSync(`ps -o tty= -p ${pid}`, {
           encoding: "utf-8",
         }).trim();
-      } catch {}
+      } catch {
+        // Expected: process may have exited between listing and tty lookup
+      }
     }
     results.push({ name: terminal.name, pid, tty, platform: process.platform });
   }
@@ -490,7 +501,9 @@ function deactivate() {
   if (registryFile) {
     try {
       fs.unlinkSync(registryFile);
-    } catch {}
+    } catch {
+      // Expected: file may have already been cleaned up
+    }
   }
 }
 

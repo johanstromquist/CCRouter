@@ -42,6 +42,7 @@ function findOnPath(name: string): string | null {
   try {
     return execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim().split("\n")[0];
   } catch {
+    // Expected: tool not found on PATH
     return null;
   }
 }
@@ -112,7 +113,9 @@ function configureMcp() {
   // Remove existing entry
   try {
     execSync("claude mcp remove ccrouter", { stdio: ["pipe", "pipe", "pipe"] });
-  } catch {}
+  } catch {
+    // Expected: MCP entry may not exist yet on first install
+  }
 
   execSync(
     `claude mcp add --transport stdio --scope user ccrouter -- node "${mcpServerPath}"`,
@@ -218,7 +221,9 @@ function installDaemon() {
   // Stop existing daemon
   try {
     execSync(`launchctl bootout gui/$(id -u)/${PLIST_NAME}`, { stdio: ["pipe", "pipe", "pipe"] });
-  } catch {}
+  } catch {
+    // Expected: daemon may not be running yet on first install
+  }
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -269,7 +274,8 @@ function installExtension() {
       });
       const rebuilt = readdirSync(extDir).filter((f) => f.endsWith(".vsix"));
       if (rebuilt.length > 0) vsixFiles.push(rebuilt[0]);
-    } catch {
+    } catch (err: any) {
+      console.error("[cli] failed to build VSIX:", err.message);
       log("6/6", "No .vsix found and could not build one. Install the extension manually.");
       return;
     }
@@ -286,7 +292,8 @@ function installExtension() {
         });
         log("6/6", `Installed extension via ${cli}.`);
         installed = true;
-      } catch {
+      } catch (err: any) {
+        console.error(`[cli] extension install via ${cli} failed:`, err.message);
         log("6/6", `Warning: failed to install via ${cli}.`);
       }
     }
@@ -351,6 +358,7 @@ async function uninstall() {
       execSync(`launchctl bootout gui/$(id -u)/${PLIST_NAME}`, { stdio: ["pipe", "pipe", "pipe"] });
       console.log("  Stopped daemon.");
     } catch {
+      // Expected: daemon may not be running
       console.log("  Daemon was not running.");
     }
     if (existsSync(PLIST_PATH)) {
@@ -364,6 +372,7 @@ async function uninstall() {
     execSync("claude mcp remove ccrouter", { stdio: ["pipe", "pipe", "pipe"] });
     console.log("  Removed MCP server config.");
   } catch {
+    // Expected: MCP entry may not exist
     console.log("  MCP config already removed.");
   }
 
@@ -421,7 +430,9 @@ async function uninstall() {
           stdio: ["pipe", "pipe", "pipe"],
         });
         console.log(`  Uninstalled extension from ${cli}.`);
-      } catch {}
+      } catch {
+        // Expected: extension may not be installed in this IDE
+      }
     }
   }
 
