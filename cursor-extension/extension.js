@@ -65,7 +65,13 @@ function activate(context) {
                 cwd,
               });
             }
-            persistSession(cwd, session_id, friendly_name, tty);
+            // Only persist if this bridge owns the terminal.
+            // With many bridges (one per Cursor window), all get notified
+            // but only the one with the terminal should write to avoid
+            // race conditions on the shared last-sessions file.
+            if (terminalPid) {
+              persistSession(cwd, session_id, friendly_name, tty);
+            }
           }
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true }));
