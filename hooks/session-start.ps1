@@ -36,7 +36,16 @@ try {
         -TimeoutSec 5 -ErrorAction Stop
 
     $name = $response.friendly_name
-    Write-Host "[CCRouter] Session registered as `"$name`". IMPORTANT: Call mcp__ccrouter__register_self now with session_id: $sessionId and cwd: $cwd"
+
+    # Bind the MCP server to this session
+    $mcpUrl = "http://127.0.0.1:19920"
+    try {
+        Invoke-RestMethod -Uri "$mcpUrl/bind" -Method Post `
+            -Body (@{session_id=$sessionId} | ConvertTo-Json) `
+            -ContentType "application/json" -TimeoutSec 2 -ErrorAction SilentlyContinue | Out-Null
+    } catch {}
+
+    Write-Host "[CCRouter] Session registered as `"$name`". You can use CCRouter tools to communicate with other sessions."
 } catch {
     exit 0
 }

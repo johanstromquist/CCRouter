@@ -51,7 +51,7 @@ async function pushToSession(session: Session, text: string) {
  * Create a new MCP server instance with all tools registered.
  * Each SSE connection gets its own server instance with its own session state.
  */
-function createMcpServer(): McpServer {
+function createMcpServer(): { server: McpServer; setSessionId: (id: string) => void } {
 
 // Per-connection session identity
 let currentSessionId: string | null = null;
@@ -804,7 +804,14 @@ server.tool(
   }
 );
 
-return server;
+return {
+  server,
+  setSessionId: (id: string) => {
+    currentSessionId = id;
+    const s = getSessionById(id);
+    if (s) currentSessionName = s.friendly_name;
+  }
+};
 } // end createMcpServer
 
 // --- Start server ---
@@ -812,8 +819,10 @@ async function main() {
   // All sessions (local + remote) connect via SSE. No stdio mode.
   const SSE_HOST = process.env.CCROUTER_MCP_HOST || "0.0.0.0";
 
-    // Track active SSE transports per session
+    // Track active SSE transports and their server instances
     const transports = new Map<string, SSEServerTransport>();
+    const serversByTransport = new Map<string, { setSessionId: (id: string) => void }>();
+    const boundTransports = new Set<string>();
 
     const httpServer = createHttpServer(async (req, res) => {
       // CORS for cross-origin requests from remote machines
@@ -835,10 +844,53 @@ async function main() {
 
         transport.onclose = () => {
           transports.delete(transport.sessionId);
+          serversByTransport.delete(transport.sessionId);
+          boundTransports.delete(transport.sessionId);
         };
 
-        const sessionServer = createMcpServer();
+        const { server: sessionServer, setSessionId } = createMcpServer();
+        serversByTransport.set(transport.sessionId, { setSessionId });
         await sessionServer.connect(transport);
+      } else if (req.url === "/bind" && req.method === "POST") {
+        // The session-start hook calls this to bind a CC session_id to the
+        // most recently connected (unbound) MCP transport. This completes
+        // the identity chain: hook knows session_id, MCP knows transport_id.
+        let body = "";
+        req.on("data", (chunk: Buffer) => { body += chunk; });
+        req.on("end", () => {
+          try {
+            const { session_id } = JSON.parse(body);
+            if (!session_id) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "session_id required" }));
+              return;
+            }
+
+            // Find the most recently connected transport that hasn't been bound yet
+            // The serversByTransport map tracks which transports have bound sessions
+            const unbound = Array.from(transports.keys()).find(
+              tid => !boundTransports.has(tid)
+            );
+
+            if (unbound) {
+              const serverState = serversByTransport.get(unbound);
+              if (serverState) {
+                serverState.setSessionId(session_id);
+                boundTransports.add(unbound);
+                log.info(`Bound session ${session_id} to transport ${unbound}`);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true, transport: unbound }));
+                return;
+              }
+            }
+
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "no unbound transport found" }));
+          } catch (err) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: String(err) }));
+          }
+        });
       } else if (req.url?.startsWith("/messages") && req.method === "POST") {
         // Route POST to the correct transport by sessionId query param
         const url = new URL(req.url, `http://localhost:${SSE_PORT}`);
