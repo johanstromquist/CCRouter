@@ -866,22 +866,23 @@ async function main() {
               return;
             }
 
-            // Find the most recently connected transport that hasn't been bound yet
-            // The serversByTransport map tracks which transports have bound sessions
-            const unbound = Array.from(transports.keys()).find(
-              tid => !boundTransports.has(tid)
-            );
-
-            if (unbound) {
-              const serverState = serversByTransport.get(unbound);
-              if (serverState) {
+            // Bind ALL unbound transports to this session_id.
+            // CC may create multiple SSE connections (e.g., on resume the hook
+            // fires twice). All connections from the same CC serve the same session.
+            let boundCount = 0;
+            for (const [tid, serverState] of serversByTransport.entries()) {
+              if (!boundTransports.has(tid)) {
                 serverState.setSessionId(session_id);
-                boundTransports.add(unbound);
-                log.info(`Bound session ${session_id} to transport ${unbound}`);
-                res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: true, transport: unbound }));
-                return;
+                boundTransports.add(tid);
+                boundCount++;
+                log.info(`Bound session ${session_id} to transport ${tid}`);
               }
+            }
+
+            if (boundCount > 0) {
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: true, bound: boundCount }));
+              return;
             }
 
             res.writeHead(404, { "Content-Type": "application/json" });
