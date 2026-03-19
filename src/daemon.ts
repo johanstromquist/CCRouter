@@ -162,14 +162,9 @@ function cleanupStaleSessions() {
     const lastSeen = session.last_seen_at ? new Date(session.last_seen_at).getTime() : 0;
     const idleMinutes = Math.round((now - lastSeen) / 60_000);
 
-    // PID check: if we have a PID and it is dead, deactivate immediately
-    if (session.pid && !isProcessAlive(session.pid)) {
-      log.info(`Deactivating "${session.friendly_name}" -- PID ${session.pid} is dead`);
-      markSessionInactive(session.session_id);
-      continue;
-    }
-
-    // Heartbeat timeout: deactivate sessions with no recent activity
+    // Heartbeat timeout only. No PID checks -- remote sessions have PIDs
+    // from other machines that appear "dead" locally, causing false deactivation.
+    // Active sessions get touchSession() on every MCP tool call, keeping them alive.
     if (lastSeen && now - lastSeen > REMOTE_HEARTBEAT_TIMEOUT) {
       log.info(`Deactivating "${session.friendly_name}" -- no heartbeat for ${idleMinutes} minutes`);
       markSessionInactive(session.session_id);
