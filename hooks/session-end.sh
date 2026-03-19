@@ -4,7 +4,15 @@
 
 set -euo pipefail
 
+# Read daemon URL from config (default: localhost)
 DAEMON_URL="http://127.0.0.1:19919"
+CONFIG_FILE="$HOME/.ccrouter/config.json"
+if [ -f "$CONFIG_FILE" ]; then
+  CONFIGURED_URL=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('daemonUrl',''))" "$CONFIG_FILE" 2>/dev/null || echo "")
+  if [ -n "$CONFIGURED_URL" ]; then
+    DAEMON_URL="$CONFIGURED_URL"
+  fi
+fi
 
 # Read session JSON from stdin
 SESSION_JSON=$(cat)

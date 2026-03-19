@@ -5,7 +5,15 @@
 
 set -euo pipefail
 
+# Read daemon URL from config (default: localhost)
 DAEMON_URL="http://127.0.0.1:19919"
+CONFIG_FILE="$HOME/.ccrouter/config.json"
+if [ -f "$CONFIG_FILE" ]; then
+  CONFIGURED_URL=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('daemonUrl',''))" "$CONFIG_FILE" 2>/dev/null || echo "")
+  if [ -n "$CONFIGURED_URL" ]; then
+    DAEMON_URL="$CONFIGURED_URL"
+  fi
+fi
 
 # Read session JSON from stdin
 SESSION_JSON=$(cat)
@@ -51,24 +59,24 @@ if [ -d "$SESSIONS_DIR" ] && [ -n "$CWD" ]; then
     DESIRED_NAME=$(python3 -c "
 import json, sys
 try:
-    sessions = json.load(open('$SESSION_FILE'))
+    sessions = json.load(open(sys.argv[1]))
     if sessions and len(sessions) > 0:
         print(sessions[0].get('friendlyName', ''))
 except: pass
-" 2>/dev/null || echo "")
+" "$SESSION_FILE" 2>/dev/null || echo "")
   fi
 fi
 
-# Build registration payload
+# Build registration payload (using sys.argv to prevent code injection)
 PAYLOAD=$(python3 -c "
 import json, sys
-d = {'session_id': '$SESSION_ID'}
-if '$CWD': d['cwd'] = '$CWD'
-if '$PID': d['pid'] = int('$PID') if '$PID'.isdigit() else None
-if '$TTY': d['tty'] = '$TTY'
-if '$DESIRED_NAME': d['desired_name'] = '$DESIRED_NAME'
+d = {'session_id': sys.argv[1]}
+if sys.argv[2]: d['cwd'] = sys.argv[2]
+if sys.argv[3]: d['pid'] = int(sys.argv[3]) if sys.argv[3].isdigit() else None
+if sys.argv[4]: d['tty'] = sys.argv[4]
+if sys.argv[5]: d['desired_name'] = sys.argv[5]
 print(json.dumps(d))
-" 2>/dev/null || echo '{"session_id":"'"$SESSION_ID"'"}')
+" "$SESSION_ID" "$CWD" "$PID" "$TTY" "$DESIRED_NAME" 2>/dev/null || echo "{\"session_id\":\"$SESSION_ID\"}")
 
 # Register with daemon
 RESPONSE=$(curl -s -X POST "$DAEMON_URL/register" \
@@ -85,6 +93,10 @@ fi
 
 # Extract friendly name
 FRIENDLY_NAME=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('friendly_name','unknown'))" 2>/dev/null || echo "unknown")
+
+# Persist session ID to file (for use by other hooks)
+mkdir -p "$HOME/.ccrouter"
+printf '%s' "$SESSION_ID" > "$HOME/.ccrouter/session_id"
 
 # Write session ID to env file if available
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
