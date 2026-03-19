@@ -314,8 +314,9 @@ async function sendToTerminal(data) {
     }
   }
 
-  // 4. Fallback: if only one terminal, use it
-  if (!terminal && vscode.window.terminals.length === 1) {
+  // 4. Fallback: if only one terminal AND no specific tty was requested
+  //    (tty requests must match -- don't steal messages meant for other machines)
+  if (!terminal && !tty && vscode.window.terminals.length === 1) {
     terminal = vscode.window.terminals[0];
     method = "single_terminal_fallback";
   }
