@@ -49,23 +49,11 @@ if [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
-# Look up previous session name for this workspace (for re-identification)
+# desired_name is intentionally NOT read from last-sessions here.
+# In multi-terminal workspaces, all terminals share the same cwd hash,
+# so reading sessions[0] would give every terminal the same name.
+# Use 'claude-r' for named session recovery instead.
 DESIRED_NAME=""
-SESSIONS_DIR="$HOME/.ccrouter/last-sessions"
-if [ -d "$SESSIONS_DIR" ] && [ -n "$CWD" ]; then
-  CWD_HASH=$(echo -n "$CWD" | md5 2>/dev/null || echo -n "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
-  SESSION_FILE="$SESSIONS_DIR/${CWD_HASH}.json"
-  if [ -f "$SESSION_FILE" ]; then
-    DESIRED_NAME=$(python3 -c "
-import json, sys
-try:
-    sessions = json.load(open(sys.argv[1]))
-    if sessions and len(sessions) > 0:
-        print(sessions[0].get('friendlyName', ''))
-except: pass
-" "$SESSION_FILE" 2>/dev/null || echo "")
-  fi
-fi
 
 # Build registration payload (using sys.argv to prevent code injection)
 PAYLOAD=$(python3 -c "

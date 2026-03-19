@@ -19,23 +19,11 @@ try {
         if ($config.daemonUrl) { $daemonUrl = $config.daemonUrl }
     }
 
-    # Look up previous session name for this workspace (for re-identification)
+    # desired_name is intentionally NOT read from last-sessions here.
+    # In multi-terminal workspaces, all terminals share the same cwd hash,
+    # so reading sessions[0] would give every terminal the same name.
+    # Use 'claude-r' for named session recovery instead.
     $desiredName = $null
-    $sessionsDir = Join-Path $ccrouterDir "last-sessions"
-    if ($cwd -and (Test-Path $sessionsDir)) {
-        $md5 = [System.Security.Cryptography.MD5]::Create()
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($cwd)
-        $hash = ($md5.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join ""
-        $sessionFile = Join-Path $sessionsDir "$hash.json"
-        if (Test-Path $sessionFile) {
-            try {
-                $savedSessions = Get-Content $sessionFile -Raw | ConvertFrom-Json
-                if ($savedSessions.Count -gt 0) {
-                    $desiredName = $savedSessions[0].friendlyName
-                }
-            } catch {}
-        }
-    }
 
     # Build payload (no tty on Windows)
     $payload = @{
