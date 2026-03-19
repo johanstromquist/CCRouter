@@ -2,6 +2,7 @@
 # CCRouter auto-ack hook -- acknowledges received CCRouter messages.
 # Runs on UserPromptSubmit. Detects [#channel] sender: ... pattern
 # and sends an ack to the daemon so the sender knows delivery succeeded.
+# Reads session_id from stdin JSON (platform-agnostic).
 
 set -euo pipefail
 
@@ -15,29 +16,17 @@ if [ -f "$CONFIG_FILE" ]; then
   fi
 fi
 
-# Read the hook JSON from stdin
+# Read the hook JSON from stdin -- contains both prompt and session_id
 INPUT=$(cat)
 
-# Extract the user's prompt text
-PROMPT=$(echo "$INPUT" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('prompt', ''))
-except:
-    pass
-" 2>/dev/null || echo "")
+# Extract prompt and session_id
+PROMPT=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('prompt',''))" 2>/dev/null || echo "")
+SESSION_ID=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null || echo "")
 
 # Match CCRouter message pattern: [#channel] sender: message
 if [[ "$PROMPT" =~ ^\[(\#[a-zA-Z0-9_-]+)\]\ ([a-zA-Z0-9_-]+):\ .+ ]]; then
   CHANNEL="${BASH_REMATCH[1]}"
   SENDER="${BASH_REMATCH[2]}"
-
-  # Session ID from env var (per-session, set via CLAUDE_ENV_FILE)
-  SESSION_ID="${CCROUTER_SESSION_ID:-}"
-  if [ -z "$SESSION_ID" ]; then
-    SESSION_ID=$(cat "$HOME/.ccrouter/session_id" 2>/dev/null || echo "")
-  fi
 
   if [ -n "$SESSION_ID" ]; then
     curl -s -X POST "$DAEMON_URL/ack" \

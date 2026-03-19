@@ -1,20 +1,15 @@
-# CCRouter ack-message hook (Windows/PowerShell)
-# Acknowledges pushed channel messages so the daemon stops retrying.
+# CCRouter auto-ack hook -- acknowledges received CCRouter messages.
+# Runs on UserPromptSubmit. Detects [#channel] sender: ... pattern
+# and sends an ack to the daemon so the sender knows delivery succeeded.
+# Reads session_id from stdin JSON (platform-agnostic).
 try {
     $inputData = [Console]::In.ReadToEnd() | ConvertFrom-Json
     $prompt = $inputData.prompt
+    $sessionId = $inputData.session_id
 
-    # Match CCRouter channel message pattern: [#channel] sender: message
     if ($prompt -match '^\[(#[a-zA-Z0-9_-]+)\]\s+([a-zA-Z0-9_-]+):') {
         $channel = $Matches[1]
         $sender = $Matches[2]
-
-        # Read session_id from file (no tty on Windows)
-        $sidFile = Join-Path ($env:USERPROFILE ?? $env:HOME ?? "/tmp") ".ccrouter/session_id"
-        $sessionId = ""
-        if (Test-Path $sidFile) {
-            $sessionId = (Get-Content $sidFile -Raw).Trim()
-        }
 
         if ($sessionId) {
             $configPath = Join-Path ($env:USERPROFILE ?? $env:HOME ?? "/tmp") ".ccrouter/config.json"
