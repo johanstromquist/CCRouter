@@ -16,45 +16,67 @@ set -euo pipefail
 
 SESSIONS_DIR="${HOME}/.ccrouter/last-sessions"
 DAEMON_URL="http://127.0.0.1:19919"
+CONFIG_FILE="$HOME/.ccrouter/config.json"
+if [ -f "$CONFIG_FILE" ]; then
+  CONFIGURED_URL=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('daemonUrl',''))" "$CONFIG_FILE" 2>/dev/null || echo "")
+  if [ -n "$CONFIGURED_URL" ]; then
+    DAEMON_URL="$CONFIGURED_URL"
+  fi
+fi
+
+# Pre-claim: register session as active in daemon BEFORE launching claude.
+# This prevents other claude-r instances from picking the same session.
+preclaim_session() {
+  local sid="$1"
+  local cwd="$PWD"
+  curl -s -X POST "$DAEMON_URL/register" \
+    -H "Content-Type: application/json" \
+    -d "{\"session_id\":\"$sid\",\"cwd\":\"$cwd\",\"pid\":$$}" \
+    --connect-timeout 1 --max-time 2 > /dev/null 2>&1 || true
+}
 
 # Hash the cwd to find the session file/directory
 CWD_HASH=$(echo -n "$PWD" | md5 2>/dev/null || echo -n "$PWD" | md5sum 2>/dev/null | cut -d' ' -f1)
 SESSION_PATH="${SESSIONS_DIR}/${CWD_HASH}"
 
-# Load sessions from either new (directory) or old (file) format
+# Load sessions from both directory and file formats, merge and deduplicate
 load_sessions() {
-  if [ -d "${SESSION_PATH}" ]; then
-    # New format: merge all per-bridge files in the directory
-    python3 -c "
+  python3 -c "
 import json, os, sys
+
 entries = []
 seen = set()
+
+def add_entry(e):
+    sid = e.get('sessionId')
+    if sid and sid not in seen:
+        entries.append(e)
+        seen.add(sid)
+
+# Read per-bridge directory (new format)
 d = sys.argv[1]
-for f in os.listdir(d):
-    if not f.endswith('.json'): continue
+if os.path.isdir(d):
+    for f in os.listdir(d):
+        if not f.endswith('.json'): continue
+        try:
+            data = json.load(open(os.path.join(d, f)))
+            if isinstance(data, dict): add_entry(data)
+            elif isinstance(data, list):
+                for e in data: add_entry(e)
+        except: pass
+
+# Also read single file (old format) -- may have sessions not in the directory
+f = d + '.json'
+if os.path.isfile(f):
     try:
-        data = json.load(open(os.path.join(d, f)))
-        if isinstance(data, dict):
-            sid = data.get('sessionId')
-            if sid and sid not in seen:
-                entries.append(data)
-                seen.add(sid)
-        elif isinstance(data, list):
-            for e in data:
-                sid = e.get('sessionId')
-                if sid and sid not in seen:
-                    entries.append(e)
-                    seen.add(sid)
+        data = json.load(open(f))
+        if isinstance(data, list):
+            for e in data: add_entry(e)
     except: pass
+
 entries.sort(key=lambda e: e.get('updatedAt',''), reverse=True)
 print(json.dumps(entries))
 " "${SESSION_PATH}"
-  elif [ -f "${SESSION_PATH}.json" ]; then
-    # Old format: read directly as JSON array
-    cat "${SESSION_PATH}.json"
-  else
-    echo "[]"
-  fi
 }
 
 SESSIONS=$(load_sessions)
@@ -137,6 +159,7 @@ else:
       exit 1
     fi
     echo "Resuming session $SESSION_ID..."
+    preclaim_session "$SESSION_ID"
     exec claude --resume "$SESSION_ID"
     ;;
   "")
@@ -182,6 +205,7 @@ print('')
     fi
 
     echo "Resuming session: $FRIENDLY_NAME ($SESSION_ID)"
+    preclaim_session "$SESSION_ID"
     exec claude --resume "$SESSION_ID"
     ;;
   *)
