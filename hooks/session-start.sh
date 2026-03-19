@@ -62,5 +62,7 @@ fi
 # Extract friendly name
 FRIENDLY_NAME=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('friendly_name','unknown'))" 2>/dev/null || echo "unknown")
 
-# Output context for Claude to see
-echo "[CCRouter] Session registered as \"$FRIENDLY_NAME\". You can use CCRouter tools (list_sessions, send_message, read_messages, etc.) to communicate with other Claude Code sessions."
+# Tell CC to bind the MCP to this session via register_self.
+# The hook registered with the daemon, but the MCP (connected via SSE)
+# needs register_self to know which session it serves.
+echo "[CCRouter] Session registered as \"$FRIENDLY_NAME\". IMPORTANT: Call mcp__ccrouter__register_self now with session_id: $SESSION_ID and cwd: $CWD"

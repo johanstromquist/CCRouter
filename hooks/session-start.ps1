@@ -36,7 +36,7 @@ try {
         -TimeoutSec 5 -ErrorAction Stop
 
     $name = $response.friendly_name
-    Write-Host "[CCRouter] Session registered as `"$name`". You can use CCRouter tools to communicate with other sessions."
+    Write-Host "[CCRouter] Session registered as `"$name`". IMPORTANT: Call mcp__ccrouter__register_self now with session_id: $sessionId and cwd: $cwd"
 } catch {
     exit 0
 }
