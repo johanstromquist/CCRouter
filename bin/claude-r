@@ -3,6 +3,10 @@
 # Reads session info persisted by the CCRouter Cursor extension.
 # Skips sessions that are already active (running in another terminal).
 #
+# Supports two persistence formats:
+#   New: directory of per-bridge files at last-sessions/{hash}/{port}.json
+#   Old: single JSON array file at last-sessions/{hash}.json
+#
 # Usage:
 #   claude-r           # resume the next available session
 #   claude-r --list    # show all saved sessions for this workspace
@@ -13,37 +17,54 @@ set -euo pipefail
 SESSIONS_DIR="${HOME}/.ccrouter/last-sessions"
 DAEMON_URL="http://127.0.0.1:19919"
 
-# Hash the cwd to find the session file
+# Hash the cwd to find the session file/directory
 CWD_HASH=$(echo -n "$PWD" | md5 2>/dev/null || echo -n "$PWD" | md5sum 2>/dev/null | cut -d' ' -f1)
-SESSION_FILE="${SESSIONS_DIR}/${CWD_HASH}.json"
+SESSION_PATH="${SESSIONS_DIR}/${CWD_HASH}"
 
-if [ ! -f "$SESSION_FILE" ]; then
+# Load sessions from either new (directory) or old (file) format
+load_sessions() {
+  if [ -d "${SESSION_PATH}" ]; then
+    # New format: merge all per-bridge files in the directory
+    python3 -c "
+import json, os, sys
+entries = []
+seen = set()
+d = sys.argv[1]
+for f in os.listdir(d):
+    if not f.endswith('.json'): continue
+    try:
+        data = json.load(open(os.path.join(d, f)))
+        if isinstance(data, dict):
+            sid = data.get('sessionId')
+            if sid and sid not in seen:
+                entries.append(data)
+                seen.add(sid)
+        elif isinstance(data, list):
+            for e in data:
+                sid = e.get('sessionId')
+                if sid and sid not in seen:
+                    entries.append(e)
+                    seen.add(sid)
+    except: pass
+entries.sort(key=lambda e: e.get('updatedAt',''), reverse=True)
+print(json.dumps(entries))
+" "${SESSION_PATH}"
+  elif [ -f "${SESSION_PATH}.json" ]; then
+    # Old format: read directly as JSON array
+    cat "${SESSION_PATH}.json"
+  else
+    echo "[]"
+  fi
+}
+
+SESSIONS=$(load_sessions)
+COUNT=$(echo "$SESSIONS" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+
+if [ "$COUNT" = "0" ]; then
   echo "No saved sessions for this workspace ($PWD)"
   echo "Start a session normally with 'claude' first."
   exit 1
 fi
-
-# Parse the session file
-SESSIONS=$(cat "$SESSION_FILE")
-COUNT=$(echo "$SESSIONS" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
-
-if [ "$COUNT" = "0" ]; then
-  echo "No saved sessions for this workspace."
-  exit 1
-fi
-
-# Get active session IDs from daemon (to skip already-running sessions)
-ACTIVE_SESSIONS=$(curl -s "$DAEMON_URL/health" --connect-timeout 1 2>/dev/null && \
-  python3 -c "
-import json, urllib.request
-try:
-    # Get all active sessions from the daemon
-    req = urllib.request.Request('$DAEMON_URL/health')
-    # We need the session list, not just health. Query the DB via a simple approach:
-    # Read the sessions file and check each against the daemon
-    pass
-except: pass
-" 2>/dev/null || echo "")
 
 # Function to check if a session is already active in the daemon
 is_session_active() {

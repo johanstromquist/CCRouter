@@ -21,12 +21,15 @@ interface BridgeResponse {
 function discoverBridges(): BridgeRegistry[] {
   try {
     fs.mkdirSync(BRIDGES_DIR, { recursive: true });
-  } catch {}
+  } catch {
+    // Expected: directory may already exist or parent path is read-only
+  }
 
   let files: string[];
   try {
     files = fs.readdirSync(BRIDGES_DIR).filter((f) => f.endsWith(".json"));
   } catch {
+    // Expected: directory may not exist yet (first run)
     return [];
   }
 
@@ -47,17 +50,21 @@ function discoverBridges(): BridgeRegistry[] {
           process.kill(data.pid, 0);
           bridges.push(data);
         } catch {
-          // Dead process, clean up registry file
+          // Expected: process exited, clean up its registry file
           try {
             fs.unlinkSync(filePath);
-          } catch {}
+          } catch {
+            // Expected: file may have been removed by another process
+          }
         }
       }
     } catch {
-      // Corrupt file, remove it
+      // Expected: corrupt or malformed bridge registry file, remove it
       try {
         fs.unlinkSync(filePath);
-      } catch {}
+      } catch {
+        // Expected: file may have been removed by another process
+      }
     }
   }
 
@@ -94,14 +101,19 @@ function sendToBridge(
           try {
             resolve(JSON.parse(body));
           } catch {
+            // Expected: bridge returned non-JSON response
             resolve(null);
           }
         });
       }
     );
 
-    req.on("error", () => resolve(null));
+    req.on("error", (err: Error) => {
+      console.error("[bridge] request failed:", err.message);
+      resolve(null);
+    });
     req.on("timeout", () => {
+      console.error("[bridge] request timed out to port", port);
       req.destroy();
       resolve(null);
     });
@@ -178,8 +190,13 @@ export function notifyBridges(session: {
       },
       () => {} // fire and forget
     );
-    req.on("error", () => {}); // ignore errors
-    req.on("timeout", () => req.destroy());
+    req.on("error", (err: Error) => {
+      console.error("[bridge] notification failed to port", bridge.port + ":", err.message);
+    });
+    req.on("timeout", () => {
+      console.error("[bridge] notification timed out to port", bridge.port);
+      req.destroy();
+    });
     req.write(payload);
     req.end();
   }

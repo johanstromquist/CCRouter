@@ -36,7 +36,7 @@ export function scanLockFiles(): Map<string, LockInfo> {
         });
       }
     } catch {
-      // Skip malformed lock files
+      // Expected: lock file may be malformed, partially written, or from a crashed process
     }
   }
 
@@ -48,6 +48,7 @@ export function isProcessAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch {
+    // Expected: process does not exist (ESRCH) or no permission (EPERM)
     return false;
   }
 }

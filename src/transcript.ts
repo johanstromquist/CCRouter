@@ -60,7 +60,7 @@ export function readTranscript(
         }
       }
     } catch {
-      // Skip malformed lines
+      // Expected: JSONL line may be malformed or truncated (partial write)
     }
   }
 

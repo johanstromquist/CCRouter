@@ -193,6 +193,7 @@ export function updateSessionName(
     }
     return true;
   } catch {
+    // Expected: UNIQUE constraint violation when name is taken by a concurrent update
     return "taken";
   }
 }
