@@ -52,15 +52,17 @@ function activate(context) {
 
           if (session_id) {
             // Try to find which terminal this session is in
-            const terminalPid = await findTerminalPidForSession(pid);
+            let terminalPid = await findTerminalPidForSession(pid);
+
+            // If PID matching fails (common on Windows where process tree
+            // walking is slow/unreliable), map to the first available terminal.
+            // The daemon already verified this bridge serves this session.
+            if (!terminalPid && vscode.window.terminals.length > 0) {
+              terminalPid = await vscode.window.terminals[0].processId;
+            }
+
             if (terminalPid) {
               sessionTerminalMap.set(session_id, terminalPid);
-            }
-            // Only persist if this bridge owns the terminal.
-            // With many bridges (one per Cursor window), all get notified
-            // but only the one with the terminal should write to avoid
-            // race conditions on the shared last-sessions file.
-            if (terminalPid) {
               persistSession(cwd, session_id, friendly_name);
             }
           }
