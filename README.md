@@ -181,23 +181,20 @@ CCRouter works on Windows as either a standalone hub or a remote client connecte
 ### Key differences from macOS
 
 - **Hooks use PowerShell** -- `.ps1` scripts with `-ExecutionPolicy Bypass` and forward-slash paths (CC on Windows runs hooks through bash which strips backslashes)
-- **No TTY** -- Windows has no terminal TTY concept. Session identification uses a file-based session ID (`~/.ccrouter/session_id`) written by the session-start hook
 - **No launchd** -- The daemon must be started manually on Windows: `node ~/.ccrouter/app/dist/daemon.js`
 - **Process tree walking** -- Uses `Get-CimInstance Win32_Process` instead of `ps`
-- **Remote PID cleanup disabled** -- The daemon skips PID liveness checks for sessions without a TTY (remote/Windows sessions) to prevent false deactivation
 
 ### Troubleshooting
 
 - **Hooks not firing?** Check that hook paths use forward slashes and include `-ExecutionPolicy Bypass`
-- **Session not persisting?** Verify `~/.ccrouter/session_id` is being written by session-start.ps1
+- **Session not persisting?** Verify the session-start hook is registering with the daemon
 - **Push delivery failing?** Check that the bridge extension is installed, the Cursor window has been reloaded, and `~/.ccrouter/config.json` has the correct daemon URL
-- **Session getting deactivated?** Remote sessions without TTY should not be PID-checked. If the daemon is deactivating them, ensure the latest daemon code is deployed
 
 ## How it works
 
-1. **Registration** -- On SessionStart, a hook script registers with the daemon. On macOS, it walks the process tree to find the TTY. On Windows, it registers with session_id and PID only (no TTY)
-2. **Identity** -- The MCP server identifies itself by matching its process tree's TTY (macOS) or reading a persisted session_id file (Windows) against registered sessions
-3. **Name persistence** -- When a session restarts in the same terminal or working directory, it inherits its previous friendly name and channel memberships. Custom names set via `set_session_name` are preserved across restarts
+1. **Registration** -- On SessionStart, a hook script registers with the daemon using session_id and PPID
+2. **Identity** -- The MCP server identifies itself by matching its parent PID (process.ppid) against registered sessions
+3. **Name persistence** -- When a session restarts in the same working directory, it inherits its previous friendly name and channel memberships. Custom names set via `set_session_name` are preserved across restarts
 4. **Channels** -- Agents form channels via invite/accept. Messages are scoped to channels -- no direct messaging or broadcasting outside of channels
 5. **Messaging** -- Messages are stored in SQLite and pushed to channel members' terminals via the bridge extension. Messages can target a specific member or broadcast to all channel members
 6. **Delivery tracking** -- Each pushed message is tracked in a `pending_acks` table. When the recipient's UserPromptSubmit hook fires, it sends an ack to the daemon. If no ack arrives within 30 seconds, the daemon retries: first by sending Enter (in case the message is stuck in the terminal buffer), then by sending "Did you receive my recent message?". If still unacked, the sender is notified that delivery failed
@@ -212,7 +209,6 @@ All runtime data lives in `~/.ccrouter/`:
 - `bridges/` -- Bridge registry files (one per VS Code/Cursor window, plus `remote-*` files for cross-machine bridges)
 - `last-sessions/` -- Persisted session mappings for crash recovery (used by `claude-r`)
 - `config.json` -- Configuration for remote setups (daemon URL)
-- `session_id` -- Current session ID (Windows, written by session-start hook)
 - `hook-debug.log` -- Debug log from session hooks
 
 ## Uninstall

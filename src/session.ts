@@ -1,43 +1,16 @@
-import { execSync } from "node:child_process";
 import Database from "better-sqlite3";
 import type { Session } from "./types.js";
 import { generateName } from "./names.js";
 import { isProcessAlive } from "./lock-scanner.js";
-import { isWindows } from "./platform.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("session");
 
 /**
- * Walk up the process tree starting from `startPid` to find a tty.
- * Unix-only: returns null on Windows (no tty concept / no `ps` command).
- */
-export function findTtyByProcessTree(startPid: number): string | null {
-  if (isWindows()) return null;
-
-  let walkPid = startPid;
-  for (let i = 0; i < 5; i++) {
-    try {
-      const ppid = execSync(`ps -o ppid= -p ${walkPid}`, { encoding: "utf-8" }).trim();
-      walkPid = parseInt(ppid, 10);
-      if (!walkPid || walkPid <= 1) break;
-      const tty = execSync(`ps -o tty= -p ${walkPid}`, { encoding: "utf-8" }).trim();
-      if (tty && tty !== "??") {
-        return tty;
-      }
-    } catch {
-      break;
-    }
-  }
-  return null;
-}
-
-/**
  * Determine the friendly name for a new session by checking (in priority order):
  *   1. desired_name from hook/file
- *   2. TTY match against inactive predecessors
- *   3. CWD match against dead-PID or recently inactive sessions
- *   4. Generate a fresh adjective-animal name
+ *   2. CWD match against dead-PID or recently inactive sessions
+ *   3. Generate a fresh adjective-animal name
  *
  * Also cleans up stale predecessor sessions as a side effect.
  */
@@ -45,7 +18,6 @@ export function resolveSessionName(
   db: Database.Database,
   opts: {
     session_id: string;
-    tty?: string;
     cwd?: string;
     desired_name?: string;
   }
@@ -85,31 +57,7 @@ export function resolveSessionName(
     }
   }
 
-  // 1. TTY match (most reliable on Mac -- same terminal = same session)
-  if (!friendlyName && opts.tty) {
-    const ttyPredecessors = db
-      .prepare(
-        `SELECT * FROM sessions
-         WHERE tty = ? AND is_active = 0 AND session_id != ?
-         ORDER BY name_custom DESC, last_seen_at DESC`
-      )
-      .all(opts.tty, opts.session_id) as Session[];
-
-    if (ttyPredecessors.length > 0) {
-      const predecessor = ttyPredecessors[0];
-      friendlyName = predecessor.friendly_name;
-      nameIsCustom = !!(predecessor.name_custom);
-      for (const pred of ttyPredecessors) {
-        db.prepare("DELETE FROM sessions WHERE session_id = ?").run(pred.session_id);
-      }
-      log.debug(`Re-identified (tty match): transferring name "${friendlyName}"`, {
-        from: predecessor.session_id,
-        to: opts.session_id,
-      });
-    }
-  }
-
-  // 2. CWD match (fallback -- clean up stale sessions, inherit name)
+  // 1. CWD match (clean up stale sessions, inherit name)
   if (!friendlyName && normalizedCwd) {
     // Clean up active sessions in this cwd with dead PIDs
     const activeSameCwd = db
@@ -189,7 +137,7 @@ export function resolveSessionName(
  * The daemon looks up: WHERE pid = ppid AND is_active = 1.
  *
  * Platform-agnostic: process.ppid works on Mac, Linux, and Windows.
- * No TTY, no env vars, no shared files.
+ * No env vars, no shared files.
  *
  * Fallback: register_self (called explicitly by the user or by CC).
  */

@@ -10,7 +10,6 @@ interface BridgeResponse {
   ok: boolean;
   error?: string;
   terminal?: string;
-  tty?: string;
   method?: string;
 }
 
@@ -77,7 +76,7 @@ function discoverBridges(): BridgeRegistry[] {
 function sendToBridge(
   port: number,
   text: string,
-  routing: { tty?: string; session_id?: string; pid?: number },
+  routing: { session_id?: string; pid?: number },
   host?: string
 ): Promise<BridgeResponse | null> {
   return new Promise((resolve) => {
@@ -125,12 +124,12 @@ function sendToBridge(
 
 /**
  * Push a message to a terminal via any available bridge instance.
- * Accepts tty (Mac), session_id, or pid for routing.
+ * Accepts session_id or pid for routing.
  * Tries each discovered bridge until one succeeds.
  */
 export async function pushToTerminal(
   text: string,
-  routing: { tty?: string; session_id?: string; pid?: number }
+  routing: { session_id?: string; pid?: number }
 ): Promise<BridgeResponse | null> {
   const bridges = discoverBridges();
   if (bridges.length === 0) {
@@ -156,11 +155,10 @@ export function isBridgeAvailable(): boolean {
 
 /**
  * Notify all bridge instances about a session registration or rename.
- * This allows the Cursor extension to persist session->tty mappings
+ * This allows the Cursor extension to persist session mappings
  * for crash recovery (claude-r).
  */
 export function notifyBridges(session: {
-  tty?: string;
   session_id: string;
   friendly_name: string;
   cwd?: string;
@@ -168,7 +166,6 @@ export function notifyBridges(session: {
 }): void {
   const bridges = discoverBridges();
   const payload = JSON.stringify({
-    tty: session.tty || null,
     session_id: session.session_id,
     friendly_name: session.friendly_name,
     cwd: session.cwd || "",

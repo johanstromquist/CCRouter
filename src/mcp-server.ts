@@ -43,7 +43,6 @@ const log = createLogger("mcp");
 /** Push a message to a session's terminal using all available routing info */
 async function pushToSession(session: Session, text: string) {
   return pushToTerminal(text, {
-    tty: session.tty || undefined,
     session_id: session.session_id,
     pid: session.pid || undefined,
   });
@@ -81,21 +80,18 @@ server.tool(
     session_id: z.string().describe("The Claude Code session ID"),
     cwd: z.string().optional().describe("Current working directory"),
     pid: z.number().optional().describe("Process ID"),
-    tty: z.string().optional().describe("Terminal tty device (e.g. ttys095)"),
   },
   async (params) => {
     const session = registerSession({
       session_id: params.session_id,
       cwd: params.cwd,
       pid: params.pid,
-      tty: params.tty,
     });
     currentSessionId = session.session_id;
     currentSessionName = session.friendly_name;
 
     // Notify bridges so they can map session_id to terminal
     notifyBridges({
-      tty: session.tty || params.tty,
       session_id: session.session_id,
       friendly_name: session.friendly_name,
       cwd: session.cwd || params.cwd,
@@ -337,7 +333,6 @@ server.tool(
       const session = getSessionById(id);
       if (session) {
         notifyBridges({
-          tty: session.tty || undefined,
           session_id: session.session_id,
           friendly_name: params.name,
           cwd: session.cwd || undefined,
@@ -646,7 +641,7 @@ server.tool(
         const result = await pushToSession(session, prompt);
         if (result?.ok) {
           pushed++;
-          createPendingAck(msg.id, channel, name, member.session_name, session.tty || "", session.session_id);
+          createPendingAck(msg.id, channel, name, member.session_name, session.session_id);
         }
       }
     }

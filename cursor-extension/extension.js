@@ -19,8 +19,6 @@ let registryFile = null;
 // In-memory maps for terminal identification
 // sessionId -> terminal processId (set via /notify from daemon)
 const sessionTerminalMap = new Map();
-// tty -> {sessionId, friendlyName, cwd} (Mac only, backwards compat)
-const ttySessionMap = new Map();
 
 function activate(context) {
   fs.mkdirSync(BRIDGES_DIR, { recursive: true });
@@ -49,28 +47,21 @@ function activate(context) {
       req.on("data", (chunk) => (body += chunk));
       req.on("end", async () => {
         try {
-          const { tty, session_id, friendly_name, cwd, pid } =
+          const { session_id, friendly_name, cwd, pid } =
             JSON.parse(body);
 
           if (session_id) {
             // Try to find which terminal this session is in
-            const terminalPid = await findTerminalPidForSession(pid, tty);
+            const terminalPid = await findTerminalPidForSession(pid);
             if (terminalPid) {
               sessionTerminalMap.set(session_id, terminalPid);
-            }
-            if (tty) {
-              ttySessionMap.set(tty, {
-                sessionId: session_id,
-                friendlyName: friendly_name,
-                cwd,
-              });
             }
             // Only persist if this bridge owns the terminal.
             // With many bridges (one per Cursor window), all get notified
             // but only the one with the terminal should write to avoid
             // race conditions on the shared last-sessions file.
             if (terminalPid) {
-              persistSession(cwd, session_id, friendly_name, tty);
+              persistSession(cwd, session_id, friendly_name);
             }
           }
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -231,30 +222,18 @@ function registerWithDaemon(port) {
 
 // Find which terminal a session's process belongs to.
 // Returns the terminal's processId if found.
-async function findTerminalPidForSession(sessionPid, tty) {
-  if (!sessionPid && !tty) return null;
+async function findTerminalPidForSession(sessionPid) {
+  if (!sessionPid) return null;
 
   for (const terminal of vscode.window.terminals) {
     const termPid = await terminal.processId;
     if (!termPid) continue;
 
     // Direct PID match (session is the shell itself, unlikely but possible)
-    if (sessionPid && termPid === sessionPid) return termPid;
+    if (termPid === sessionPid) return termPid;
 
     // Check if session PID is a descendant of the terminal's shell
-    if (sessionPid && isDescendant(termPid, sessionPid)) return termPid;
-
-    // TTY match (Mac only)
-    if (tty && !IS_WINDOWS) {
-      try {
-        const termTty = execSync(`ps -o tty= -p ${termPid}`, {
-          encoding: "utf-8",
-        }).trim();
-        if (termTty === tty) return termPid;
-      } catch {
-        // Expected: process may have exited between listing and tty lookup
-      }
-    }
+    if (isDescendant(termPid, sessionPid)) return termPid;
   }
 
   return null;
@@ -297,9 +276,9 @@ function isDescendant(parentPid, childPid) {
   return false;
 }
 
-// Unified send: accepts {session_id, text} or {tty, text} or {pid, text}
+// Unified send: accepts {session_id, text} or {pid, text}
 async function sendToTerminal(data) {
-  const { session_id, tty, pid, text } = data;
+  const { session_id, pid, text } = data;
   let terminal = null;
   let method = "";
 
@@ -310,13 +289,7 @@ async function sendToTerminal(data) {
     method = "session_id";
   }
 
-  // 2. Try tty (Mac)
-  if (!terminal && tty && !IS_WINDOWS) {
-    terminal = await findTerminalByTty(tty);
-    method = "tty";
-  }
-
-  // 3. Try pid (find terminal whose shell is ancestor of this pid)
+  // 2. Try pid (find terminal whose shell is ancestor of this pid)
   if (!terminal && pid) {
     for (const t of vscode.window.terminals) {
       const termPid = await t.processId;
@@ -328,9 +301,8 @@ async function sendToTerminal(data) {
     }
   }
 
-  // 4. Fallback: if only one terminal AND no specific tty was requested
-  //    (tty requests must match -- don't steal messages meant for other machines)
-  if (!terminal && !tty && vscode.window.terminals.length === 1) {
+  // 3. Fallback: if only one terminal, use it
+  if (!terminal && vscode.window.terminals.length === 1) {
     terminal = vscode.window.terminals[0];
     method = "single_terminal_fallback";
   }
@@ -338,7 +310,7 @@ async function sendToTerminal(data) {
   if (!terminal) {
     return {
       ok: false,
-      error: `No terminal found for session_id=${session_id} tty=${tty} pid=${pid}`,
+      error: `No terminal found for session_id=${session_id} pid=${pid}`,
     };
   }
 
@@ -398,48 +370,6 @@ async function findTerminalByProcessId(targetPid) {
   return null;
 }
 
-async function findTerminalByTty(tty) {
-  // Direct match
-  for (const terminal of vscode.window.terminals) {
-    const pid = await terminal.processId;
-    if (!pid) continue;
-    try {
-      const termTty = execSync(`ps -o tty= -p ${pid}`, {
-        encoding: "utf-8",
-      }).trim();
-      if (termTty === tty) return terminal;
-    } catch {
-      // Expected: process may have exited between listing and tty lookup
-      continue;
-    }
-  }
-
-  // Fallback: child process owns the tty
-  for (const terminal of vscode.window.terminals) {
-    const pid = await terminal.processId;
-    if (!pid) continue;
-    try {
-      const descendants = execSync(`pgrep -P ${pid} 2>/dev/null`, {
-        encoding: "utf-8",
-      })
-        .trim()
-        .split("\n");
-      for (const childPid of descendants) {
-        if (!childPid) continue;
-        const childTty = execSync(`ps -o tty= -p ${childPid}`, {
-          encoding: "utf-8",
-        }).trim();
-        if (childTty === tty) return terminal;
-      }
-    } catch {
-      // Expected: process may have exited or pgrep found no children
-      continue;
-    }
-  }
-
-  return null;
-}
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -447,7 +377,7 @@ function sleep(ms) {
 // Persist session info for claude-r.
 // Each bridge writes its own file keyed by port to avoid race conditions
 // when multiple bridge instances receive /notify for the same session.
-function persistSession(cwd, sessionId, friendlyName, tty) {
+function persistSession(cwd, sessionId, friendlyName) {
   if (!cwd) return;
   const crypto = require("crypto");
   const key = crypto.createHash("md5").update(cwd).digest("hex");
@@ -466,7 +396,6 @@ function persistSession(cwd, sessionId, friendlyName, tty) {
   const entry = {
     sessionId,
     friendlyName,
-    tty: tty || null,
     cwd,
     updatedAt: new Date().toISOString(),
   };
@@ -483,17 +412,7 @@ async function getTerminalMap() {
   const results = [];
   for (const terminal of vscode.window.terminals) {
     const pid = await terminal.processId;
-    let tty = null;
-    if (pid && !IS_WINDOWS) {
-      try {
-        tty = execSync(`ps -o tty= -p ${pid}`, {
-          encoding: "utf-8",
-        }).trim();
-      } catch {
-        // Expected: process may have exited between listing and tty lookup
-      }
-    }
-    results.push({ name: terminal.name, pid, tty, platform: process.platform });
+    results.push({ name: terminal.name, pid, platform: process.platform });
   }
   return results;
 }

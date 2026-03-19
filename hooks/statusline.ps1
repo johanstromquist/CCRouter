@@ -1,7 +1,7 @@
 # CCRouter status line -- shows session name in Claude Code footer
 # Reads session_id from stdin JSON (provided by CC to all hooks and statusline)
 # then queries the daemon HTTP API for the friendly name.
-# Platform-agnostic: no TTY, no env vars, no shared files.
+# Platform-agnostic: no env vars, no shared files.
 try {
     $sessionJson = [Console]::In.ReadToEnd()
     $session = $sessionJson | ConvertFrom-Json

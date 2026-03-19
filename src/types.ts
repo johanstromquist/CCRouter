@@ -2,7 +2,6 @@ export interface Session {
   session_id: string;
   friendly_name: string;
   pid: number | null;
-  tty: string | null;
   cwd: string | null;
   workspace_folders: string | null; // JSON array
   ide_name: string | null;
@@ -53,7 +52,6 @@ export interface ChannelInvite {
 export interface RegisterRequest {
   session_id: string;
   pid?: number;
-  tty?: string;
   cwd?: string;
   desired_name?: string;
   workspace_folders?: string[];

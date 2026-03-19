@@ -23,7 +23,6 @@ export function getDb(): Database.Database {
 export function registerSession(opts: {
   session_id: string;
   pid?: number;
-  tty?: string;
   cwd?: string;
   desired_name?: string;
   workspace_folders?: string[];
@@ -39,23 +38,6 @@ export function registerSession(opts: {
   const result = db.transaction(() => {
     const now = new Date().toISOString();
 
-    // Check if there's already an active session on this tty.
-    // If so, reuse it rather than creating a new one.
-    if (opts.tty) {
-      const ttySession = db
-        .prepare(
-          "SELECT * FROM sessions WHERE tty = ? AND is_active = 1 AND session_id != ?"
-        )
-        .get(opts.tty, opts.session_id) as Session | undefined;
-
-      if (ttySession) {
-        db.prepare(
-          "UPDATE sessions SET last_seen_at = ?, pid = COALESCE(?, pid), cwd = COALESCE(?, cwd) WHERE session_id = ?"
-        ).run(now, opts.pid ?? null, normalizedCwd ?? null, ttySession.session_id);
-        return ttySession;
-      }
-    }
-
     // Check if session already exists (same session_id reconnecting)
     const existing = db
       .prepare("SELECT * FROM sessions WHERE session_id = ?")
@@ -64,14 +46,13 @@ export function registerSession(opts: {
     if (existing) {
       db.prepare(
         `UPDATE sessions SET is_active = 1, last_seen_at = ?, pid = COALESCE(?, pid),
-         tty = COALESCE(?, tty), cwd = COALESCE(?, cwd),
+         cwd = COALESCE(?, cwd),
          workspace_folders = COALESCE(?, workspace_folders),
          ide_name = COALESCE(?, ide_name), lock_port = COALESCE(?, lock_port)
          WHERE session_id = ?`
       ).run(
         now,
         opts.pid ?? null,
-        opts.tty ?? null,
         normalizedCwd ?? null,
         opts.workspace_folders ? JSON.stringify(opts.workspace_folders) : null,
         opts.ide_name ?? null,
@@ -86,19 +67,17 @@ export function registerSession(opts: {
     // Delegate name resolution to session.ts
     const { name: friendlyName, isCustom: nameIsCustom } = resolveSessionName(db, {
       session_id: opts.session_id,
-      tty: opts.tty,
       cwd: normalizedCwd,
       desired_name: opts.desired_name,
     });
 
     db.prepare(
-      `INSERT INTO sessions (session_id, friendly_name, pid, tty, cwd, workspace_folders, ide_name, lock_port, registered_at, last_seen_at, is_active, name_custom)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
+      `INSERT INTO sessions (session_id, friendly_name, pid, cwd, workspace_folders, ide_name, lock_port, registered_at, last_seen_at, is_active, name_custom)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
     ).run(
       opts.session_id,
       friendlyName,
       opts.pid ?? null,
-      opts.tty ?? null,
       normalizedCwd ?? null,
       opts.workspace_folders ? JSON.stringify(opts.workspace_folders) : null,
       opts.ide_name ?? null,
@@ -391,7 +370,6 @@ export interface PendingAck {
   channel: string;
   sender_name: string;
   target_name: string;
-  target_tty: string | null;
   target_session_id: string | null;
   created_at: string;
   acked_at: string | null;
@@ -404,51 +382,36 @@ export function createPendingAck(
   channel: string,
   senderName: string,
   targetName: string,
-  targetIdentifier: string,
-  targetSessionId?: string
+  targetSessionId: string
 ): void {
   const db = getDb();
   db.prepare(
-    `INSERT INTO pending_acks (message_id, channel, sender_name, target_name, target_tty, target_session_id, created_at, retry_count, failed)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)`
-  ).run(messageId, channel, senderName, targetName, targetIdentifier, targetSessionId || null, new Date().toISOString());
+    `INSERT INTO pending_acks (message_id, channel, sender_name, target_name, target_session_id, created_at, retry_count, failed)
+     VALUES (?, ?, ?, ?, ?, ?, 0, 0)`
+  ).run(messageId, channel, senderName, targetName, targetSessionId, new Date().toISOString());
 }
 
 export function ackMessage(
   channel: string,
   senderName: string,
-  opts: { targetTty?: string; targetSessionId?: string }
+  targetSessionId: string
 ): boolean {
   const db = getDb();
   let pending: { id: number } | undefined;
 
-  if (opts.targetTty) {
-    // Mac: match by tty
-    pending = db
-      .prepare(
-        `SELECT id FROM pending_acks
-         WHERE channel = ? AND sender_name = ? AND target_tty = ?
-           AND acked_at IS NULL AND failed = 0
-         ORDER BY created_at DESC LIMIT 1`
-      )
-      .get(channel, senderName, opts.targetTty) as { id: number } | undefined;
-  }
+  // Match by session_id
+  pending = db
+    .prepare(
+      `SELECT id FROM pending_acks
+       WHERE channel = ? AND sender_name = ? AND target_session_id = ?
+         AND acked_at IS NULL AND failed = 0
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(channel, senderName, targetSessionId) as { id: number } | undefined;
 
-  if (!pending && opts.targetSessionId) {
-    // Windows/remote: match by session_id
-    pending = db
-      .prepare(
-        `SELECT id FROM pending_acks
-         WHERE channel = ? AND sender_name = ? AND target_session_id = ?
-           AND acked_at IS NULL AND failed = 0
-         ORDER BY created_at DESC LIMIT 1`
-      )
-      .get(channel, senderName, opts.targetSessionId) as { id: number } | undefined;
-  }
-
-  if (!pending && opts.targetSessionId) {
+  if (!pending) {
     // Fallback: match by target_name (resolved from session_id)
-    const session = getSessionById(opts.targetSessionId);
+    const session = getSessionById(targetSessionId);
     if (session) {
       pending = db
         .prepare(

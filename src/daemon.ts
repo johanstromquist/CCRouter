@@ -23,7 +23,6 @@ import { createLogger } from "./logger.js";
 import {
   DAEMON_PORT,
   POLL_INTERVAL,
-  INACTIVITY_TIMEOUT,
   REMOTE_HEARTBEAT_TIMEOUT,
   BIND_HOST,
   ACK_TIMEOUT_SECONDS,
@@ -61,7 +60,6 @@ async function handleRegister(req: IncomingMessage, res: ServerResponse) {
 
   // Notify bridges so they can persist the session mapping and build terminal maps
   notifyBridges({
-    tty: session.tty || body.tty,
     session_id: session.session_id,
     friendly_name: session.friendly_name,
     cwd: session.cwd || body.cwd,
@@ -97,17 +95,13 @@ async function handleAck(req: IncomingMessage, res: ServerResponse) {
   const body = JSON.parse(await readBody(req)) as {
     channel: string;
     sender: string;
-    tty?: string;
     session_id?: string;
   };
-  if (!body.channel || !body.sender || (!body.tty && !body.session_id)) {
-    json(res, 400, { error: "channel, sender, and (tty or session_id) required" });
+  if (!body.channel || !body.sender || !body.session_id) {
+    json(res, 400, { error: "channel, sender, and session_id required" });
     return;
   }
-  const acked = ackMessage(body.channel, body.sender, {
-    targetTty: body.tty,
-    targetSessionId: body.session_id,
-  });
+  const acked = ackMessage(body.channel, body.sender, body.session_id);
   json(res, 200, { ok: true, acked });
 }
 
@@ -165,32 +159,20 @@ function cleanupStaleSessions() {
   const now = Date.now();
 
   for (const session of sessions) {
-    const isRemote = !session.tty; // No tty = remote/Windows session
     const lastSeen = session.last_seen_at ? new Date(session.last_seen_at).getTime() : 0;
     const idleMinutes = Math.round((now - lastSeen) / 60_000);
 
-    if (isRemote) {
-      // Remote sessions: can't PID-check (PID is from a different machine).
-      // Use heartbeat timeout only.
-      if (lastSeen && now - lastSeen > REMOTE_HEARTBEAT_TIMEOUT) {
-        log.info(`Deactivating remote session "${session.friendly_name}" -- no heartbeat for ${idleMinutes} minutes`);
-        markSessionInactive(session.session_id);
-      }
-    } else {
-      // Local sessions: PID check is reliable (same machine).
-      if (session.pid && !isProcessAlive(session.pid)) {
-        log.info(`Deactivating "${session.friendly_name}" -- PID ${session.pid} is dead`);
-        markSessionInactive(session.session_id);
-        continue;
-      }
+    // PID check: if we have a PID and it is dead, deactivate immediately
+    if (session.pid && !isProcessAlive(session.pid)) {
+      log.info(`Deactivating "${session.friendly_name}" -- PID ${session.pid} is dead`);
+      markSessionInactive(session.session_id);
+      continue;
+    }
 
-      // Inactivity timeout for local sessions with dead PIDs
-      if (lastSeen && now - lastSeen > INACTIVITY_TIMEOUT) {
-        if (session.pid && !isProcessAlive(session.pid)) {
-          log.info(`Deactivating "${session.friendly_name}" -- inactive for ${idleMinutes} minutes and PID ${session.pid} is dead`);
-          markSessionInactive(session.session_id);
-        }
-      }
+    // Heartbeat timeout: deactivate sessions with no recent activity
+    if (lastSeen && now - lastSeen > REMOTE_HEARTBEAT_TIMEOUT) {
+      log.info(`Deactivating "${session.friendly_name}" -- no heartbeat for ${idleMinutes} minutes`);
+      markSessionInactive(session.session_id);
     }
   }
 }
@@ -205,7 +187,6 @@ async function retryUnackedMessages() {
     // Resolve target session for routing info
     const targetSession = resolveSession(pending.target_name);
     const routing = {
-      tty: pending.target_tty || undefined,
       session_id: targetSession?.session_id,
       pid: targetSession?.pid || undefined,
     };
@@ -227,7 +208,6 @@ async function retryUnackedMessages() {
       if (sender) {
         const notice = `[CCRouter] Message delivery to "${pending.target_name}" in ${pending.channel} was not acknowledged after retries. The agent may be unresponsive.`;
         await pushToTerminal(notice, {
-          tty: sender.tty || undefined,
           session_id: sender.session_id,
           pid: sender.pid || undefined,
         });
