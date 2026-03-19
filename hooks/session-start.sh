@@ -82,11 +82,10 @@ fi
 # Extract friendly name
 FRIENDLY_NAME=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('friendly_name','unknown'))" 2>/dev/null || echo "unknown")
 
-# Persist session ID to file (for use by other hooks)
-mkdir -p "$HOME/.ccrouter"
-printf '%s' "$SESSION_ID" > "$HOME/.ccrouter/session_id"
-
-# Write session ID to env file if available
+# Write session ID to CC's per-session env file. This is the primary
+# identification mechanism -- each session gets its own env file, so
+# CCROUTER_SESSION_ID is unique per terminal. Other hooks (statusline,
+# ack) read this env var instead of a shared file.
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   echo "export CCROUTER_SESSION_ID=$SESSION_ID" >> "$CLAUDE_ENV_FILE"
 fi

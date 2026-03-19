@@ -18,7 +18,7 @@ fi
 # Read the hook JSON from stdin
 INPUT=$(cat)
 
-# Extract the user's prompt text from the hook input
+# Extract the user's prompt text
 PROMPT=$(echo "$INPUT" | python3 -c "
 import sys, json
 try:
@@ -33,11 +33,13 @@ if [[ "$PROMPT" =~ ^\[(\#[a-zA-Z0-9_-]+)\]\ ([a-zA-Z0-9_-]+):\ .+ ]]; then
   CHANNEL="${BASH_REMATCH[1]}"
   SENDER="${BASH_REMATCH[2]}"
 
-  # Read session_id from file (consistent with PowerShell hook)
-  SESSION_ID=$(cat "$HOME/.ccrouter/session_id" 2>/dev/null || echo "")
+  # Session ID from env var (per-session, set via CLAUDE_ENV_FILE)
+  SESSION_ID="${CCROUTER_SESSION_ID:-}"
+  if [ -z "$SESSION_ID" ]; then
+    SESSION_ID=$(cat "$HOME/.ccrouter/session_id" 2>/dev/null || echo "")
+  fi
 
   if [ -n "$SESSION_ID" ]; then
-    # Fire-and-forget ack to daemon
     curl -s -X POST "$DAEMON_URL/ack" \
       -H "Content-Type: application/json" \
       -d "{\"channel\":\"$CHANNEL\",\"sender\":\"$SENDER\",\"session_id\":\"$SESSION_ID\"}" \
