@@ -239,18 +239,12 @@ async function findTerminalPidForSession(sessionPid) {
 function isDescendant(parentPid, childPid) {
   try {
     if (IS_WINDOWS) {
-      // Windows: walk up process tree from child using wmic
-      let currentPid = childPid;
-      for (let i = 0; i < 10; i++) {
-        const out = execSync(
-          `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${currentPid}').ParentProcessId"`,
-          { encoding: "utf-8", timeout: 3000 }
-        ).trim();
-        const ppid = parseInt(out, 10);
-        if (!ppid || ppid <= 1) return false;
-        if (ppid === parentPid) return true;
-        currentPid = ppid;
-      }
+      // Windows: walk entire process tree in a single PowerShell call
+      const result = execSync(
+        `powershell -NoProfile -Command "$p=${childPid}; for($i=0;$i -lt 10;$i++){$o=Get-CimInstance Win32_Process -Filter \\"ProcessId=$p\\" -ErrorAction SilentlyContinue; if(-not $o){break}; $p=$o.ParentProcessId; if($p -eq ${parentPid}){Write-Output 'FOUND'; break}; if($p -le 1){break}}; Write-Output 'DONE'"`,
+        { encoding: "utf-8", timeout: 5000 }
+      ).trim();
+      return result.includes("FOUND");
     } else {
       // Unix: walk up from child using ps
       let currentPid = childPid;
@@ -278,7 +272,9 @@ async function sendToTerminal(data) {
   let terminal = null;
   let method = "";
 
-  // Find terminal by PID descendant check (session's PID is a child of the terminal's shell)
+  // Find terminal by PID descendant check (session's PID is a child of the terminal's shell).
+  // This is the primary routing mechanism on Mac. On Windows, isDescendant
+  // uses PowerShell which may fail -- the fallback below handles that.
   if (!terminal && pid) {
     for (const t of vscode.window.terminals) {
       const termPid = await t.processId;
