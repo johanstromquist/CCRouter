@@ -278,14 +278,7 @@ async function sendToTerminal(data) {
   let terminal = null;
   let method = "";
 
-  // 1. Try session_id -> terminal map
-  if (session_id && sessionTerminalMap.has(session_id)) {
-    const termPid = sessionTerminalMap.get(session_id);
-    terminal = await findTerminalByProcessId(termPid);
-    method = "session_id";
-  }
-
-  // 2. Try pid (find terminal whose shell is ancestor of this pid)
+  // Find terminal by PID descendant check (session's PID is a child of the terminal's shell)
   if (!terminal && pid) {
     for (const t of vscode.window.terminals) {
       const termPid = await t.processId;
