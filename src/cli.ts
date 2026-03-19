@@ -152,6 +152,19 @@ function configureHooksAndPermissions() {
     hookCommand(`session-end${ext}`)
   );
 
+  // PreToolUse hook: inject session_id into CCRouter MCP tool calls
+  if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
+  const injectCmd = hookCommand(`ccrouter-inject-session${ext}`);
+  const hasInjectHook = settings.hooks.PreToolUse.some((entry: any) =>
+    entry.hooks?.some((h: any) => h.command?.includes("ccrouter-inject-session"))
+  );
+  if (!hasInjectHook) {
+    settings.hooks.PreToolUse.push({
+      matcher: "mcp__ccrouter__.*",
+      hooks: [{ type: "command", command: injectCmd }],
+    });
+  }
+
   // UserPromptSubmit hook for message delivery acks
   if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
   const ackCmd = hookCommand(`ack-message${ext}`);

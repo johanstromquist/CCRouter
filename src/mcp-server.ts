@@ -84,7 +84,12 @@ function bindSession(id: string): void {
   try { fs.writeFileSync(bindingsFile, JSON.stringify(bindings)); } catch {}
 }
 
-function ensureRegistered(): { id: string; name: string } {
+function ensureRegistered(params?: Record<string, unknown>): { id: string; name: string } {
+  // Auto-bind from _session_id injected by PreToolUse hook
+  if (!currentSessionId && params?._session_id) {
+    bindSession(params._session_id as string);
+  }
+
   if (currentSessionId) {
     const s = getSessionById(currentSessionId);
     if (s) {
@@ -93,8 +98,7 @@ function ensureRegistered(): { id: string; name: string } {
     }
   }
   throw new Error(
-    "Session not registered. The session-start hook should have called /bind. " +
-      "If not, call register_self with your session_id."
+    "Session not registered. Call register_self with your session_id."
   );
 }
 
@@ -187,9 +191,9 @@ server.tool(
   "who_am_i",
   "Show this session's identity in CCRouter",
   {},
-  async () => {
+  async (params: any) => {
     try {
-      const { id, name } = ensureRegistered();
+      const { id, name } = ensureRegistered(params);
       const session = getSessionById(id);
       const channels = getChannelsForSession(name);
       return {
@@ -228,13 +232,13 @@ server.tool(
   "list_sessions",
   "List all active Claude Code sessions (for discovery -- use invite_to_channel to communicate)",
   {},
-  async () => {
+  async (params: any) => {
     const sessions = getActiveSessions();
 
     // Build set of channels the calling session belongs to
     let me: Session | undefined;
     try {
-      const { id } = ensureRegistered();
+      const { id } = ensureRegistered(params);
       me = getSessionById(id);
     } catch {
       me = undefined;
@@ -312,7 +316,7 @@ server.tool(
       .describe("New name (lowercase alphanumeric and hyphens only)"),
   },
   async (params) => {
-    const { id } = ensureRegistered();
+    const { id } = ensureRegistered(params);
     const result = updateSessionName(id, params.name);
     if (result === true) {
       currentSessionName = params.name;
@@ -428,7 +432,7 @@ server.tool(
     target_name: z.string().describe("Friendly name of the session to invite"),
   },
   async (params) => {
-    const { name } = ensureRegistered();
+    const { name } = ensureRegistered(params);
     const channel = normalizeChannel(params.channel);
 
     const target = resolveSession(params.target_name);
@@ -483,7 +487,7 @@ server.tool(
     channel: z.string().describe('Channel name to accept invite for (e.g. "#deploy")'),
   },
   async (params) => {
-    const { name } = ensureRegistered();
+    const { name } = ensureRegistered(params);
     const channel = normalizeChannel(params.channel);
 
     // Look up the invite before accepting (to get inviter info)
@@ -537,7 +541,7 @@ server.tool(
     channel: z.string().describe('Channel name to decline invite for (e.g. "#deploy")'),
   },
   async (params) => {
-    const { name } = ensureRegistered();
+    const { name } = ensureRegistered(params);
     const channel = normalizeChannel(params.channel);
 
     // Look up the invite before declining (to get inviter info)
@@ -585,7 +589,7 @@ server.tool(
     message: z.string().describe("Message content"),
   },
   async (params) => {
-    const { name } = ensureRegistered();
+    const { name } = ensureRegistered(params);
     const channel = normalizeChannel(params.channel);
 
     if (!isChannelMember(channel, name)) {
@@ -669,7 +673,7 @@ server.tool(
       .describe("Include already-read messages"),
   },
   async (params) => {
-    const { name } = ensureRegistered();
+    const { name } = ensureRegistered(params);
 
     let channels: string[];
     if (params.channel) {
@@ -725,7 +729,7 @@ server.tool(
     channel: z.string().describe('Channel name to leave (e.g. "#deploy")'),
   },
   async (params) => {
-    const { name } = ensureRegistered();
+    const { name } = ensureRegistered(params);
     const channel = normalizeChannel(params.channel);
 
     if (!isChannelMember(channel, name)) {
@@ -772,8 +776,8 @@ server.tool(
   "list_channels",
   "List channels you are a member of and their members",
   {},
-  async () => {
-    const { name } = ensureRegistered();
+  async (params: any) => {
+    const { name } = ensureRegistered(params);
 
     const memberships = getChannelsForSession(name);
     if (memberships.length === 0) {
@@ -811,8 +815,8 @@ server.tool(
   "list_invites",
   "List pending channel invitations for this session",
   {},
-  async () => {
-    const { name } = ensureRegistered();
+  async (params: any) => {
+    const { name } = ensureRegistered(params);
 
     const invites = getPendingInvites(name);
     if (invites.length === 0) {
@@ -844,10 +848,8 @@ return {
 async function main() {
   // All sessions (local + remote) connect via SSE. No stdio mode.
 
-    // Track active SSE transports and their server instances
+    // Track active SSE transports
     const transports = new Map<string, SSEServerTransport>();
-    const serversByTransport = new Map<string, { setSessionId: (id: string) => void }>();
-    const boundTransports = new Set<string>();
 
 
     // Load persisted bindings for auto-restore on reconnect
@@ -880,62 +882,13 @@ async function main() {
 
         transport.onclose = () => {
           transports.delete(transport.sessionId);
-          serversByTransport.delete(transport.sessionId);
-          boundTransports.delete(transport.sessionId);
         };
 
-        const { server: sessionServer, setSessionId } = createMcpServer();
-        serversByTransport.set(transport.sessionId, { setSessionId });
+        const { server: sessionServer } = createMcpServer();
         await sessionServer.connect(transport);
 
-        // No auto-bind. The /bind call from the session-start hook is the
-        // only way to set identity. This avoids cross-session contamination
-        // when multiple sessions connect to the same MCP server.
-      } else if (req.url === "/bind" && req.method === "POST") {
-        // The session-start hook calls this to bind a CC session_id to the
-        // most recently connected (unbound) MCP transport. This completes
-        // the identity chain: hook knows session_id, MCP knows transport_id.
-        let body = "";
-        req.on("data", (chunk: Buffer) => { body += chunk; });
-        req.on("end", () => {
-          try {
-            const { session_id } = JSON.parse(body);
-            if (!session_id) {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: "session_id required" }));
-              return;
-            }
-
-            // Bind ONE unbound transport to this session_id.
-            // Each /bind call grabs exactly one transport. With N sessions
-            // and N transports, each hook's /bind gets its own transport.
-            // The hook fires twice on resume, so a second /bind for the same
-            // session_id will grab the second transport (if any).
-            let boundCount = 0;
-            for (const [tid, serverState] of serversByTransport.entries()) {
-              if (!boundTransports.has(tid)) {
-                serverState.setSessionId(session_id);
-                boundTransports.add(tid);
-                boundCount++;
-                log.info(`Bound session ${session_id} to transport ${tid}`);
-                break; // one at a time
-              }
-            }
-
-            if (boundCount > 0) {
-              res.writeHead(200, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: true, bound: boundCount }));
-              return;
-            }
-
-            // No unbound transports found
-            res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: false, error: "no unbound transport found" }));
-          } catch (err) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: false, error: String(err) }));
-          }
-        });
+        // Identity is set by PreToolUse hook injecting _session_id into
+        // tool params. No /bind endpoint needed.
       } else if (req.url?.startsWith("/messages") && req.method === "POST") {
         // Route POST to the correct transport by sessionId query param
         const url = new URL(req.url, `http://localhost:${SSE_PORT}`);

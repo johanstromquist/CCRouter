@@ -57,13 +57,4 @@ fi
 # Extract friendly name
 FRIENDLY_NAME=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('friendly_name','unknown'))" 2>/dev/null || echo "unknown")
 
-# Bind the MCP server to this session. The MCP server runs on SSE and doesn't
-# know which CC session it serves. The /bind endpoint matches the most recently
-# connected unbound MCP transport to this session_id.
-MCP_URL=$(echo "$DAEMON_URL" | sed 's/:19919/:19920/')
-curl -s -X POST "$MCP_URL/bind" \
-  -H "Content-Type: application/json" \
-  -d "{\"session_id\":\"$SESSION_ID\"}" \
-  --connect-timeout 1 --max-time 2 > /dev/null 2>&1 || true
-
 echo "[CCRouter] Session registered as \"$FRIENDLY_NAME\". You can use CCRouter tools to communicate with other Claude Code sessions."

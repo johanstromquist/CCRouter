@@ -37,14 +37,6 @@ try {
 
     $name = $response.friendly_name
 
-    # Bind the MCP server to this session (derive MCP port from daemon URL)
-    $mcpUrl = $daemonUrl -replace ':19919', ':19920'
-    try {
-        Invoke-RestMethod -Uri "$mcpUrl/bind" -Method Post `
-            -Body (@{session_id=$sessionId} | ConvertTo-Json) `
-            -ContentType "application/json" -TimeoutSec 2 -ErrorAction SilentlyContinue | Out-Null
-    } catch {}
-
     Write-Host "[CCRouter] Session registered as `"$name`". You can use CCRouter tools to communicate with other sessions."
 } catch {
     exit 0
