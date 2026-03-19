@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import type { Session, Message, ChannelMember, ChannelInvite } from "./types.js";
 import { resolveSessionName } from "./session.js";
 import { CCROUTER_HOME, DB_PATH } from "./config.js";
+import { runMigrations } from "./migration.js";
 
 let _db: Database.Database | null = null;
 
@@ -14,96 +15,7 @@ export function getDb(): Database.Database {
   _db.pragma("journal_mode = WAL");
   _db.pragma("busy_timeout = 5000");
 
-  _db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      session_id TEXT PRIMARY KEY,
-      friendly_name TEXT UNIQUE NOT NULL,
-      pid INTEGER,
-      tty TEXT,
-      cwd TEXT,
-      workspace_folders TEXT,
-      ide_name TEXT,
-      lock_port INTEGER,
-      registered_at TEXT NOT NULL,
-      last_seen_at TEXT NOT NULL,
-      is_active INTEGER DEFAULT 1
-    );
-
-    CREATE TABLE IF NOT EXISTS messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      from_session TEXT NOT NULL,
-      to_session TEXT NOT NULL,
-      content TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      read_at TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_session);
-    CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(is_active);
-  `);
-
-  // Migration: add tty column if missing
-  const cols = _db
-    .prepare("PRAGMA table_info(sessions)")
-    .all() as { name: string }[];
-  if (!cols.some((c) => c.name === "tty")) {
-    _db.exec("ALTER TABLE sessions ADD COLUMN tty TEXT");
-  }
-
-  // Migration: add target_session_id to pending_acks if missing
-  const ackCols = _db
-    .prepare("PRAGMA table_info(pending_acks)")
-    .all() as { name: string }[];
-  if (ackCols.length > 0 && !ackCols.some((c) => c.name === "target_session_id")) {
-    _db.exec("ALTER TABLE pending_acks ADD COLUMN target_session_id TEXT");
-  }
-
-  // Migration: rename messages.to_session -> messages.channel
-  const msgCols = _db
-    .prepare("PRAGMA table_info(messages)")
-    .all() as { name: string }[];
-  if (msgCols.some((c) => c.name === "to_session") && !msgCols.some((c) => c.name === "channel")) {
-    _db.exec("ALTER TABLE messages RENAME COLUMN to_session TO channel");
-  }
-
-  // Channel tables
-  _db.exec(`
-    CREATE TABLE IF NOT EXISTS channel_members (
-      channel_name TEXT NOT NULL,
-      session_name TEXT NOT NULL,
-      joined_at TEXT NOT NULL,
-      PRIMARY KEY (channel_name, session_name)
-    );
-
-    CREATE TABLE IF NOT EXISTS channel_invites (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      channel_name TEXT NOT NULL,
-      from_session TEXT NOT NULL,
-      to_session TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending'
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_channel_members_session ON channel_members(session_name);
-    CREATE INDEX IF NOT EXISTS idx_channel_invites_to ON channel_invites(to_session, status);
-
-    CREATE TABLE IF NOT EXISTS pending_acks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      message_id INTEGER NOT NULL,
-      channel TEXT NOT NULL,
-      sender_name TEXT NOT NULL,
-      target_name TEXT NOT NULL,
-      target_tty TEXT,
-      target_session_id TEXT,
-      created_at TEXT NOT NULL,
-      acked_at TEXT,
-      retry_count INTEGER DEFAULT 0,
-      failed INTEGER DEFAULT 0
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_pending_acks_unacked
-      ON pending_acks(acked_at, failed, created_at);
-  `);
+  runMigrations(_db);
 
   return _db;
 }

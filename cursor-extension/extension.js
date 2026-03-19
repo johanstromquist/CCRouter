@@ -374,10 +374,12 @@ async function sendToTerminal(data) {
     vscode.commands.executeCommand(
       "workbench.action.terminal.sendSequence",
       { text: "\u000d" }
-    )
+    ).catch((err) => {
+      console.error("CCRouter: Enter delivery failed:", err.message);
+    })
   );
 
-  return { ok: true, terminal: terminal.name, method };
+  return { ok: true, terminal: terminal.name, method, enter_pending: true };
 }
 
 async function findTerminalByProcessId(targetPid) {
