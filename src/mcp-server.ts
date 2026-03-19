@@ -906,10 +906,11 @@ async function main() {
               return;
             }
 
-            // Bind all unbound transports to this session_id.
-            // CC may create multiple SSE connections (hook fires twice on resume).
-            // Each /bind call only binds transports that haven't been bound yet,
-            // so different sessions don't steal each other's transports.
+            // Bind ONE unbound transport to this session_id.
+            // Each /bind call grabs exactly one transport. With N sessions
+            // and N transports, each hook's /bind gets its own transport.
+            // The hook fires twice on resume, so a second /bind for the same
+            // session_id will grab the second transport (if any).
             let boundCount = 0;
             for (const [tid, serverState] of serversByTransport.entries()) {
               if (!boundTransports.has(tid)) {
@@ -917,6 +918,7 @@ async function main() {
                 boundTransports.add(tid);
                 boundCount++;
                 log.info(`Bound session ${session_id} to transport ${tid}`);
+                break; // one at a time
               }
             }
 
