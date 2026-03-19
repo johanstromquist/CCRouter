@@ -102,6 +102,9 @@ function ensureRegistered(params?: Record<string, unknown>): { id: string; name:
   );
 }
 
+// Hidden param injected by PreToolUse hook -- carries CC session_id
+const _sid = { _session_id: z.string().optional() };
+
 const server = new McpServer({
   name: "ccrouter",
   version: "2.0.0",
@@ -111,7 +114,7 @@ const server = new McpServer({
 server.tool(
   "register_self",
   "Register this session with CCRouter (use if session-start hook did not register automatically)",
-  {
+  { ..._sid,
     session_id: z.string().describe("The Claude Code session ID"),
     cwd: z.string().optional().describe("Current working directory"),
     pid: z.number().optional().describe("Process ID"),
@@ -150,7 +153,7 @@ server.tool(
 server.tool(
   "install",
   "Install CCRouter on this machine. Downloads and installs the Cursor extension for push message delivery. Run this once on any new machine after adding the MCP.",
-  {},
+  { ..._sid },
   async () => {
     const serverIp = ADVERTISE_IP || "127.0.0.1";
     const daemonUrl = `http://${serverIp}:${DAEMON_PORT}`;
@@ -190,7 +193,7 @@ server.tool(
 server.tool(
   "who_am_i",
   "Show this session's identity in CCRouter",
-  {},
+  { ..._sid },
   async (params: any) => {
     try {
       const { id, name } = ensureRegistered(params);
@@ -231,7 +234,7 @@ server.tool(
 server.tool(
   "list_sessions",
   "List all active Claude Code sessions (for discovery -- use invite_to_channel to communicate)",
-  {},
+  { ..._sid },
   async (params: any) => {
     const sessions = getActiveSessions();
 
@@ -282,7 +285,7 @@ server.tool(
 server.tool(
   "get_session_info",
   "Get detailed information about a specific session",
-  {
+  { ..._sid,
     name_or_id: z.string().describe("Session friendly name or session ID"),
   },
   async (params) => {
@@ -309,7 +312,7 @@ server.tool(
 server.tool(
   "set_session_name",
   "Change this session's friendly name",
-  {
+  { ..._sid,
     name: z
       .string()
       .regex(/^[a-z0-9-]+$/)
@@ -353,7 +356,7 @@ server.tool(
 server.tool(
   "read_session_transcript",
   "Read another session's conversation history",
-  {
+  { ..._sid,
     name_or_id: z.string().describe("Target session friendly name or session ID"),
     tail: z
       .number()
@@ -425,7 +428,7 @@ function normalizeChannel(name: string): string {
 server.tool(
   "invite_to_channel",
   "Invite another session to a channel. The channel materializes when the invite is accepted. You auto-join when you invite.",
-  {
+  { ..._sid,
     channel: z
       .string()
       .describe('Channel name (e.g. "#deploy")'),
@@ -483,7 +486,7 @@ server.tool(
 server.tool(
   "accept_invite",
   "Accept a pending channel invitation and join the channel",
-  {
+  { ..._sid,
     channel: z.string().describe('Channel name to accept invite for (e.g. "#deploy")'),
   },
   async (params) => {
@@ -537,7 +540,7 @@ server.tool(
 server.tool(
   "decline_invite",
   "Decline a pending channel invitation",
-  {
+  { ..._sid,
     channel: z.string().describe('Channel name to decline invite for (e.g. "#deploy")'),
   },
   async (params) => {
@@ -583,7 +586,7 @@ server.tool(
 server.tool(
   "send_message",
   "Send a message to a specific member or all members of a channel. Both sender and target must be members of the channel. Messages are pushed to terminals and automatically acknowledged -- if no ack is received within 30s, the system retries (first Enter, then a nudge). You will be notified if delivery ultimately fails.",
-  {
+  { ..._sid,
     channel: z.string().describe('Channel context (e.g. "#deploy")'),
     to: z.string().optional().describe("Target session name. Omit to broadcast to all channel members."),
     message: z.string().describe("Message content"),
@@ -661,7 +664,7 @@ server.tool(
 server.tool(
   "read_messages",
   "Read messages from channels you are a member of",
-  {
+  { ..._sid,
     channel: z
       .string()
       .optional()
@@ -725,7 +728,7 @@ server.tool(
 server.tool(
   "leave_channel",
   "Leave a channel. The channel dissolves when all members leave.",
-  {
+  { ..._sid,
     channel: z.string().describe('Channel name to leave (e.g. "#deploy")'),
   },
   async (params) => {
@@ -775,7 +778,7 @@ server.tool(
 server.tool(
   "list_channels",
   "List channels you are a member of and their members",
-  {},
+  { ..._sid },
   async (params: any) => {
     const { name } = ensureRegistered(params);
 
@@ -814,7 +817,7 @@ server.tool(
 server.tool(
   "list_invites",
   "List pending channel invitations for this session",
-  {},
+  { ..._sid },
   async (params: any) => {
     const { name } = ensureRegistered(params);
 

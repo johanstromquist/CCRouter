@@ -6,8 +6,7 @@ set -euo pipefail
 INPUT=$(cat)
 SID=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null || echo "")
 if [ -n "$SID" ]; then
-  # Get existing tool_input and add _session_id
-  UPDATED=$(echo "$INPUT" | python3 -c "
+  echo "$INPUT" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 ti = d.get('tool_input', {})
@@ -19,7 +18,6 @@ print(json.dumps({
     'updatedInput': ti
   }
 }))
-" "$SID")
-  echo "$UPDATED"
+" "$SID"
 fi
 exit 0
