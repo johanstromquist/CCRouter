@@ -15,7 +15,6 @@ import {
   getActiveSessions,
   resolveSession,
   updateSessionName,
-  touchSession,
   getSessionById,
   getDb,
   joinChannel,
@@ -34,7 +33,12 @@ import {
 } from "./db.js";
 import { readTranscript, formatTranscript } from "./transcript.js";
 import { pushToTerminal, notifyBridges } from "./bridge.js";
+import { resolveCurrentSession } from "./session.js";
+import { createLogger } from "./logger.js";
+import { SSE_PORT, ADVERTISE_IP, DAEMON_PORT } from "./config.js";
 import type { Session } from "./types.js";
+
+const log = createLogger("mcp");
 
 /** Push a message to a session's terminal using all available routing info */
 async function pushToSession(session: Session, text: string) {
@@ -45,74 +49,23 @@ async function pushToSession(session: Session, text: string) {
   });
 }
 
-// Determine our session ID from environment or file
-let currentSessionId: string | null =
-  process.env.CCROUTER_SESSION_ID || null;
-
-// Fallback: read session_id from file (Windows hooks write here since env vars
-// don't propagate to the MCP server subprocess)
-if (!currentSessionId) {
-  const sidFile = path.join(
-    process.env.HOME || process.env.USERPROFILE || "",
-    ".ccrouter",
-    "session_id"
-  );
-  try {
-    currentSessionId = fs.readFileSync(sidFile, "utf-8").trim() || null;
-  } catch {}
-}
-
+// Mutable session identity -- set by register_self and resolved lazily
+let currentSessionId: string | null = null;
 let currentSessionName: string | null = null;
 
-/**
- * Walk up the process tree to find our tty, then look up the session by tty.
- * Unix-only: Windows has no tty concept and no `ps` command.
- */
-function findSessionByProcessTree(): Session | undefined {
-  // Windows: skip process tree walking entirely.
-  // Session identification on Windows uses file-based session_id.
-  if (process.platform === "win32") return undefined;
-
-  let walkPid = process.pid;
-  for (let i = 0; i < 5; i++) {
-    try {
-      const ppid = execSync(`ps -o ppid= -p ${walkPid}`, { encoding: "utf-8" }).trim();
-      walkPid = parseInt(ppid, 10);
-      if (!walkPid || walkPid <= 1) break;
-      const tty = execSync(`ps -o tty= -p ${walkPid}`, { encoding: "utf-8" }).trim();
-      if (tty && tty !== "??") {
-        const db = getDb();
-        const session = db
-          .prepare("SELECT * FROM sessions WHERE tty = ? AND is_active = 1 ORDER BY last_seen_at DESC LIMIT 1")
-          .get(tty) as Session | undefined;
-        if (session) return session;
-      }
-    } catch {
-      break;
-    }
-  }
-  return undefined;
-}
-
 function ensureRegistered(): { id: string; name: string } {
+  // If register_self was called in this process, try that first
   if (currentSessionId) {
     const s = getSessionById(currentSessionId);
     if (s) {
-      touchSession(currentSessionId);
       return { id: currentSessionId, name: s.friendly_name };
     }
   }
-  // Fallback: find session by walking the process tree to match tty
-  const s = findSessionByProcessTree();
-  if (s) {
-    currentSessionId = s.session_id;
-    touchSession(s.session_id);
-    return { id: s.session_id, name: s.friendly_name };
-  }
-  throw new Error(
-    "Session not registered. The session-start hook should have registered this session. " +
-      "If not, call register_self with your session_id."
-  );
+  // Delegate to the canonical resolver (env var -> file -> process tree)
+  const resolved = resolveCurrentSession(getDb());
+  currentSessionId = resolved.id;
+  currentSessionName = resolved.name;
+  return resolved;
 }
 
 const server = new McpServer({
@@ -166,18 +119,14 @@ server.tool(
   "Install CCRouter on this machine. Downloads and installs the Cursor extension for push message delivery. Run this once on any new machine after adding the MCP.",
   {},
   async () => {
-    // Determine the MCP server URL (SSE mode) from the connection context
-    const mcpHost = process.env.CCROUTER_MCP_HOST || "0.0.0.0";
-    const mcpPort = process.env.CCROUTER_MCP_PORT || "19920";
     // In SSE mode, we can serve the VSIX. In stdio mode, it's local.
     const isSSE = process.argv.includes("--sse");
 
     if (isSSE) {
       // Remote mode -- CC should download, install, and configure
-      const serverIp = process.env.CCROUTER_ADVERTISE_IP || "192.168.68.87";
-      const daemonPort = process.env.CCROUTER_DAEMON_PORT || "19919";
-      const daemonUrl = `http://${serverIp}:${daemonPort}`;
-      const extensionUrl = `http://${serverIp}:${mcpPort}/extension`;
+      const serverIp = ADVERTISE_IP || "192.168.68.87";
+      const daemonUrl = `http://${serverIp}:${DAEMON_PORT}`;
+      const extensionUrl = `http://${serverIp}:${SSE_PORT}/extension`;
 
       // Determine OS-appropriate temp path and config path
       const instructions = [
@@ -297,9 +246,13 @@ server.tool(
     const sessions = getActiveSessions();
 
     // Build set of channels the calling session belongs to
-    const me = currentSessionId
-      ? getSessionById(currentSessionId)
-      : findSessionByProcessTree();
+    let me: Session | undefined;
+    try {
+      const { id } = ensureRegistered();
+      me = getSessionById(id);
+    } catch {
+      me = undefined;
+    }
     const myChannels = me
       ? new Set(getChannelsForSession(me.friendly_name).map((m) => m.channel_name))
       : new Set<string>();
@@ -902,7 +855,6 @@ async function main() {
 
   if (mode === "sse") {
     // Network mode: SSE transport for remote CC sessions
-    const SSE_PORT = parseInt(process.env.CCROUTER_MCP_PORT || "19920", 10);
     const SSE_HOST = process.env.CCROUTER_MCP_HOST || "0.0.0.0";
 
     // Track active SSE transports per session
@@ -985,25 +937,17 @@ async function main() {
     });
 
     httpServer.listen(SSE_PORT, SSE_HOST, () => {
-      console.log(`CCRouter MCP server (SSE) listening on http://${SSE_HOST}:${SSE_PORT}`);
-      console.log(`Remote CC: claude mcp add ccrouter --transport sse --url http://<this-ip>:${SSE_PORT}/sse`);
+      log.info(`MCP server (SSE) listening on http://${SSE_HOST}:${SSE_PORT}`);
+      log.info(`Remote CC: claude mcp add ccrouter --transport sse --url http://<this-ip>:${SSE_PORT}/sse`);
     });
   } else {
     // Local mode: stdio transport (default, used by local CC sessions)
     const transport = new StdioServerTransport();
     await server.connect(transport);
-
-    // If we have a session ID, try to look up our name from the DB
-    if (currentSessionId) {
-      const s = getSessionById(currentSessionId);
-      if (s) {
-        currentSessionName = s.friendly_name;
-      }
-    }
   }
 }
 
 main().catch((err) => {
-  console.error("CCRouter MCP server failed to start:", err);
+  log.error("MCP server failed to start", { error: String(err) });
   process.exit(1);
 });

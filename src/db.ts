@@ -1,22 +1,15 @@
 import Database from "better-sqlite3";
-import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import type { Session, Message, ChannelMember, ChannelInvite } from "./types.js";
-import { generateName } from "./names.js";
-import { isProcessAlive } from "./lock-scanner.js";
-
-const DB_DIR = join(
-  process.env.HOME || process.env.USERPROFILE || "/tmp",
-  ".ccrouter"
-);
-const DB_PATH = join(DB_DIR, "ccrouter.db");
+import { resolveSessionName } from "./session.js";
+import { CCROUTER_HOME, DB_PATH } from "./config.js";
 
 let _db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
   if (_db) return _db;
 
-  mkdirSync(DB_DIR, { recursive: true });
+  mkdirSync(CCROUTER_HOME, { recursive: true });
   _db = new Database(DB_PATH);
   _db.pragma("journal_mode = WAL");
   _db.pragma("busy_timeout = 5000");
@@ -178,128 +171,13 @@ export function registerSession(opts: {
         .get(opts.session_id) as Session;
     }
 
-    // --- Re-identification: determine friendly name for new session ---
-    let friendlyName: string | null = null;
-    let nameIsCustom = false;
-
-    // 0. Desired name (highest priority -- hook read from persisted session file)
-    //    Claim if the name is free or held by an inactive session.
-    if (!friendlyName && opts.desired_name) {
-      const activeTaken = db
-        .prepare(
-          "SELECT session_id FROM sessions WHERE friendly_name = ? AND is_active = 1 AND session_id != ?"
-        )
-        .get(opts.desired_name, opts.session_id) as { session_id: string } | undefined;
-
-      if (!activeTaken) {
-        // Delete any inactive session holding this name + transfer channel memberships
-        const inactive = db
-          .prepare(
-            "SELECT session_id FROM sessions WHERE friendly_name = ? AND is_active = 0"
-          )
-          .get(opts.desired_name) as { session_id: string } | undefined;
-        if (inactive) {
-          db.prepare("DELETE FROM sessions WHERE session_id = ?").run(inactive.session_id);
-        }
-        friendlyName = opts.desired_name;
-        nameIsCustom = true;
-        console.log(
-          `[db] Re-identified (desired_name): claiming "${friendlyName}" for ${opts.session_id}`
-        );
-      } else {
-        console.log(
-          `[db] desired_name "${opts.desired_name}" taken by active session ${activeTaken.session_id}, falling through`
-        );
-      }
-    }
-
-    // 1. TTY match (most reliable on Mac -- same terminal = same session)
-    if (!friendlyName && opts.tty) {
-      const ttyPredecessors = db
-        .prepare(
-          `SELECT * FROM sessions
-           WHERE tty = ? AND is_active = 0 AND session_id != ?
-           ORDER BY name_custom DESC, last_seen_at DESC`
-        )
-        .all(opts.tty, opts.session_id) as (Session & { name_custom?: number })[];
-
-      if (ttyPredecessors.length > 0) {
-        const predecessor = ttyPredecessors[0];
-        friendlyName = predecessor.friendly_name;
-        nameIsCustom = !!(predecessor as any).name_custom;
-        for (const pred of ttyPredecessors) {
-          db.prepare("DELETE FROM sessions WHERE session_id = ?").run(pred.session_id);
-        }
-        console.log(
-          `[db] Re-identified (tty match): transferring name "${friendlyName}" from ${predecessor.session_id} to ${opts.session_id}`
-        );
-      }
-    }
-
-    // 2. CWD match (fallback -- clean up stale sessions, inherit name)
-    if (!friendlyName && normalizedCwd) {
-      // Clean up active sessions in this cwd with dead PIDs
-      const activeSameCwd = db
-        .prepare(
-          `SELECT * FROM sessions
-           WHERE cwd = ? AND is_active = 1 AND session_id != ?
-           ORDER BY last_seen_at DESC`
-        )
-        .all(normalizedCwd, opts.session_id) as Session[];
-
-      for (const candidate of activeSameCwd) {
-        if (candidate.pid && !isProcessAlive(candidate.pid)) {
-          if (!friendlyName) {
-            friendlyName = candidate.friendly_name;
-            console.log(
-              `[db] Re-identified (cwd match, dead pid): transferring name "${friendlyName}" from ${candidate.session_id} to ${opts.session_id}`
-            );
-          }
-          db.prepare("DELETE FROM sessions WHERE session_id = ?").run(
-            candidate.session_id
-          );
-        }
-      }
-
-      // Check recently inactive sessions by cwd.
-      // Only inherit if exactly one candidate (ambiguous = skip).
-      if (!friendlyName) {
-        const candidates = db
-          .prepare(
-            `SELECT * FROM sessions
-             WHERE cwd = ? AND is_active = 0 AND session_id != ?
-               AND last_seen_at > datetime('now', '-24 hours')
-               ORDER BY name_custom DESC, last_seen_at DESC`
-          )
-          .all(normalizedCwd, opts.session_id) as Session[];
-
-        if (candidates.length === 1) {
-          friendlyName = candidates[0].friendly_name;
-          db.prepare("DELETE FROM sessions WHERE session_id = ?").run(
-            candidates[0].session_id
-          );
-          console.log(
-            `[db] Re-identified (cwd match, inactive): transferring name "${friendlyName}" from ${candidates[0].session_id} to ${opts.session_id}`
-          );
-        } else if (candidates.length > 1) {
-          console.log(
-            `[db] Ambiguous cwd match for ${normalizedCwd}: ${candidates.length} inactive candidates, skipping re-identification`
-          );
-        }
-      }
-    }
-
-    // Generate a new name only if we didn't inherit one
-    if (!friendlyName) {
-      const existingNames = new Set(
-        (
-          db.prepare("SELECT friendly_name FROM sessions").all() as {
-            friendly_name: string;
-          }[]
-        ).map((r) => r.friendly_name)
-      );
-      friendlyName = generateName(existingNames);
-    }
+    // Delegate name resolution to session.ts
+    const { name: friendlyName, isCustom: nameIsCustom } = resolveSessionName(db, {
+      session_id: opts.session_id,
+      tty: opts.tty,
+      cwd: normalizedCwd,
+      desired_name: opts.desired_name,
+    });
 
     db.prepare(
       `INSERT INTO sessions (session_id, friendly_name, pid, tty, cwd, workspace_folders, ide_name, lock_port, registered_at, last_seen_at, is_active, name_custom)

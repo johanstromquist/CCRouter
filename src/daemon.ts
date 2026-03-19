@@ -19,11 +19,19 @@ import {
 } from "./db.js";
 import { pushToTerminal, notifyBridges } from "./bridge.js";
 import { scanLockFiles, isProcessAlive } from "./lock-scanner.js";
+import { createLogger } from "./logger.js";
+import {
+  DAEMON_PORT,
+  POLL_INTERVAL,
+  INACTIVITY_TIMEOUT,
+  REMOTE_HEARTBEAT_TIMEOUT,
+  BIND_HOST,
+  ACK_TIMEOUT_SECONDS,
+  BRIDGES_DIR,
+} from "./config.js";
 import type { RegisterRequest, Session } from "./types.js";
 
-const PORT = 19919;
-const POLL_INTERVAL = 30_000; // 30s -- PID alive checks
-const INACTIVITY_TIMEOUT = 60 * 60 * 1000; // 60 minutes
+const log = createLogger("daemon");
 
 // --- HTTP helpers ---
 
@@ -115,22 +123,17 @@ async function handleRegisterBridge(req: IncomingMessage, res: ServerResponse) {
   }
 
   // Write a bridge registry file so bridge.ts can discover this remote bridge
-  const bridgesDir = path.join(
-    process.env.HOME || process.env.USERPROFILE || "/tmp",
-    ".ccrouter",
-    "bridges"
-  );
-  fs.mkdirSync(bridgesDir, { recursive: true });
+  fs.mkdirSync(BRIDGES_DIR, { recursive: true });
 
   // Clean up old bridge files for this host (port may have changed on restart)
   try {
-    const files = fs.readdirSync(bridgesDir).filter((f: string) => f.startsWith(`remote-${body.host}-`));
+    const files = fs.readdirSync(BRIDGES_DIR).filter((f: string) => f.startsWith(`remote-${body.host}-`));
     for (const f of files) {
-      try { fs.unlinkSync(path.join(bridgesDir, f)); } catch {}
+      try { fs.unlinkSync(path.join(BRIDGES_DIR, f)); } catch {}
     }
   } catch {}
 
-  const registryFile = path.join(bridgesDir, `remote-${body.host}-${body.port}.json`);
+  const registryFile = path.join(BRIDGES_DIR, `remote-${body.host}-${body.port}.json`);
   fs.writeFileSync(
     registryFile,
     JSON.stringify({
@@ -142,7 +145,7 @@ async function handleRegisterBridge(req: IncomingMessage, res: ServerResponse) {
     })
   );
 
-  console.log(`[bridge] Remote bridge registered: ${body.host}:${body.port}`);
+  log.info(`Remote bridge registered: ${body.host}:${body.port}`);
   json(res, 200, { ok: true, registered: `${body.host}:${body.port}` });
 }
 
@@ -161,8 +164,6 @@ function cleanupStaleSessions() {
   const sessions = getActiveSessions();
   const now = Date.now();
 
-  const REMOTE_HEARTBEAT_TIMEOUT = 10 * 60 * 1000; // 10 minutes for remote sessions
-
   for (const session of sessions) {
     const isRemote = !session.tty; // No tty = remote/Windows session
     const lastSeen = session.last_seen_at ? new Date(session.last_seen_at).getTime() : 0;
@@ -170,19 +171,15 @@ function cleanupStaleSessions() {
 
     if (isRemote) {
       // Remote sessions: can't PID-check (PID is from a different machine).
-      // Use heartbeat timeout only -- if no touchSession() in 10 minutes, deactivate.
+      // Use heartbeat timeout only.
       if (lastSeen && now - lastSeen > REMOTE_HEARTBEAT_TIMEOUT) {
-        console.log(
-          `[cleanup] Deactivating remote session "${session.friendly_name}" -- no heartbeat for ${idleMinutes} minutes`
-        );
+        log.info(`Deactivating remote session "${session.friendly_name}" -- no heartbeat for ${idleMinutes} minutes`);
         markSessionInactive(session.session_id);
       }
     } else {
       // Local sessions: PID check is reliable (same machine).
       if (session.pid && !isProcessAlive(session.pid)) {
-        console.log(
-          `[cleanup] Deactivating "${session.friendly_name}" -- PID ${session.pid} is dead`
-        );
+        log.info(`Deactivating "${session.friendly_name}" -- PID ${session.pid} is dead`);
         markSessionInactive(session.session_id);
         continue;
       }
@@ -190,9 +187,7 @@ function cleanupStaleSessions() {
       // Inactivity timeout for local sessions with dead PIDs
       if (lastSeen && now - lastSeen > INACTIVITY_TIMEOUT) {
         if (session.pid && !isProcessAlive(session.pid)) {
-          console.log(
-            `[cleanup] Deactivating "${session.friendly_name}" -- inactive for ${idleMinutes} minutes and PID ${session.pid} is dead`
-          );
+          log.info(`Deactivating "${session.friendly_name}" -- inactive for ${idleMinutes} minutes and PID ${session.pid} is dead`);
           markSessionInactive(session.session_id);
         }
       }
@@ -203,8 +198,8 @@ function cleanupStaleSessions() {
 // --- Message delivery retry ---
 
 async function retryUnackedMessages() {
-  // Check for messages unacked after 30 seconds
-  const unacked = getUnackedMessages(30);
+  // Check for messages unacked after the configured timeout
+  const unacked = getUnackedMessages(ACK_TIMEOUT_SECONDS);
 
   for (const pending of unacked) {
     // Resolve target session for routing info
@@ -216,22 +211,16 @@ async function retryUnackedMessages() {
     };
 
     if (pending.retry_count === 0) {
-      console.log(
-        `[retry] Nudging ${pending.target_name} (Enter) for message ${pending.message_id} in ${pending.channel}`
-      );
+      log.info(`Nudging ${pending.target_name} (Enter) for message ${pending.message_id} in ${pending.channel}`);
       await pushToTerminal("", routing);
       incrementRetry(pending.id);
     } else if (pending.retry_count === 1) {
-      console.log(
-        `[retry] Prodding ${pending.target_name} for message ${pending.message_id} in ${pending.channel}`
-      );
+      log.info(`Prodding ${pending.target_name} for message ${pending.message_id} in ${pending.channel}`);
       const nudge = `[${pending.channel}] ${pending.sender_name}: Did you receive my recent message?`;
       await pushToTerminal(nudge, routing);
       incrementRetry(pending.id);
     } else {
-      console.log(
-        `[retry] Delivery failed for message ${pending.message_id} to ${pending.target_name} -- notifying ${pending.sender_name}`
-      );
+      log.warn(`Delivery failed for message ${pending.message_id} to ${pending.target_name} -- notifying ${pending.sender_name}`);
       markAckFailed(pending.id);
 
       const sender = resolveSession(pending.sender_name);
@@ -267,7 +256,7 @@ function syncLockFiles() {
 
 const httpServer = createServer(async (req, res) => {
   try {
-    const url = new URL(req.url || "/", `http://localhost:${PORT}`);
+    const url = new URL(req.url || "/", `http://localhost:${DAEMON_PORT}`);
 
     if (req.method === "POST" && url.pathname === "/register") {
       await handleRegister(req, res);
@@ -289,7 +278,7 @@ const httpServer = createServer(async (req, res) => {
       json(res, 404, { error: "not found" });
     }
   } catch (err) {
-    console.error("[http] Error:", err);
+    log.error("HTTP error", { error: String(err) });
     json(res, 500, { error: "internal error" });
   }
 });
@@ -300,12 +289,11 @@ function main() {
   // Initialize DB
   getDb();
 
-  const BIND_HOST = process.env.CCROUTER_BIND_HOST || "0.0.0.0";
-  httpServer.listen(PORT, BIND_HOST, () => {
-    console.log(`CCRouter daemon listening on http://${BIND_HOST}:${PORT}`);
+  httpServer.listen(DAEMON_PORT, BIND_HOST, () => {
+    log.info(`Daemon listening on http://${BIND_HOST}:${DAEMON_PORT}`);
   });
 
-  // Periodic cleanup (30s)
+  // Periodic cleanup
   setInterval(() => {
     try {
       cleanupStaleSessions();
@@ -313,21 +301,21 @@ function main() {
       syncLockFiles();
       cleanupOldAcks();
     } catch (err) {
-      console.error("[poll] Error during cleanup:", err);
+      log.error("Error during cleanup", { error: String(err) });
     }
   }, POLL_INTERVAL);
 
   // Message delivery retry (10s -- needs faster cadence than cleanup)
   setInterval(() => {
     retryUnackedMessages().catch((err) => {
-      console.error("[retry] Error during retry loop:", err);
+      log.error("Error during retry loop", { error: String(err) });
     });
   }, 10_000);
 
   // Run once at startup
   cleanupStaleSessions();
 
-  console.log("CCRouter daemon started");
+  log.info("CCRouter daemon started");
 }
 
 main();

@@ -1,13 +1,10 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { BRIDGES_DIR, BRIDGE_TIMEOUT } from "./config.js";
+import type { BridgeRegistry } from "./types.js";
 
 const DEFAULT_BRIDGE_HOST = "127.0.0.1";
-const BRIDGES_DIR = path.join(
-  process.env.HOME || process.env.USERPROFILE || "/tmp",
-  ".ccrouter",
-  "bridges"
-);
 
 interface BridgeResponse {
   ok: boolean;
@@ -15,13 +12,6 @@ interface BridgeResponse {
   terminal?: string;
   tty?: string;
   method?: string;
-}
-
-interface BridgeRegistry {
-  port: number;
-  pid: number;
-  host?: string;
-  started: number;
 }
 
 /**
@@ -49,7 +39,7 @@ function discoverBridges(): BridgeRegistry[] {
       ) as BridgeRegistry;
 
       // Remote bridges can't be PID-checked -- just trust them
-      if ((data as any).remote) {
+      if (data.remote) {
         bridges.push(data);
       } else {
         // Local bridge: check if the process is still alive
@@ -95,7 +85,7 @@ function sendToBridge(
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(payload),
         },
-        timeout: 3000,
+        timeout: BRIDGE_TIMEOUT,
       },
       (res) => {
         let body = "";

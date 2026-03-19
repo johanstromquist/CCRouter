@@ -10,6 +10,20 @@ export interface Session {
   registered_at: string;
   last_seen_at: string;
   is_active: number; // 0 or 1
+  name_custom?: number; // 1 if the name was explicitly set by user or inherited from a custom-named predecessor
+}
+
+export function isSessionActive(s: Session): boolean {
+  return s.is_active === 1;
+}
+
+export interface BridgeRegistry {
+  port: number;
+  pid: number;
+  host?: string;
+  remote?: boolean;
+  platform?: string;
+  started: number;
 }
 
 export interface Message {
