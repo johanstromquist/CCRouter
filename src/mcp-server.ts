@@ -56,6 +56,26 @@ function createMcpServer(): { server: McpServer; setSessionId: (id: string) => v
 let currentSessionId: string | null = null;
 let currentSessionName: string | null = null;
 
+// Shared bind function -- used by both register_self tool and /bind endpoint.
+// Persists the binding so it survives MCP server restarts.
+const bindingsFile = path.join(
+  process.env.HOME || process.env.USERPROFILE || "/tmp",
+  ".ccrouter",
+  "mcp-bindings.json"
+);
+
+function bindSession(id: string): void {
+  currentSessionId = id;
+  const s = getSessionById(id);
+  if (s) currentSessionName = s.friendly_name;
+
+  // Persist
+  let bindings: string[] = [];
+  try { bindings = JSON.parse(fs.readFileSync(bindingsFile, "utf-8")); } catch {}
+  if (!bindings.includes(id)) bindings.push(id);
+  try { fs.writeFileSync(bindingsFile, JSON.stringify(bindings)); } catch {}
+}
+
 function ensureRegistered(): { id: string; name: string } {
   if (currentSessionId) {
     const s = getSessionById(currentSessionId);
@@ -89,8 +109,8 @@ server.tool(
       cwd: params.cwd,
       pid: params.pid,
     });
-    currentSessionId = session.session_id;
-    currentSessionName = session.friendly_name;
+
+    bindSession(session.session_id);
 
     // Notify bridges so they can map session_id to terminal
     notifyBridges({
@@ -805,11 +825,7 @@ server.tool(
 
 return {
   server,
-  setSessionId: (id: string) => {
-    currentSessionId = id;
-    const s = getSessionById(id);
-    if (s) currentSessionName = s.friendly_name;
-  }
+  setSessionId: bindSession,
 };
 } // end createMcpServer
 
@@ -821,6 +837,16 @@ async function main() {
     const transports = new Map<string, SSEServerTransport>();
     const serversByTransport = new Map<string, { setSessionId: (id: string) => void }>();
     const boundTransports = new Set<string>();
+
+    // Load persisted bindings for auto-restore on reconnect
+    function loadBindings(): string[] {
+      const f = path.join(
+        process.env.HOME || process.env.USERPROFILE || "/tmp",
+        ".ccrouter",
+        "mcp-bindings.json"
+      );
+      try { return JSON.parse(fs.readFileSync(f, "utf-8")); } catch { return []; }
+    }
 
     const httpServer = createHttpServer(async (req, res) => {
       // CORS for cross-origin requests from remote machines
@@ -849,6 +875,22 @@ async function main() {
         const { server: sessionServer, setSessionId } = createMcpServer();
         serversByTransport.set(transport.sessionId, { setSessionId });
         await sessionServer.connect(transport);
+
+        // Auto-bind from persisted bindings (handles MCP server restart).
+        // If a session was previously bound and CC reconnected, bind it again.
+        const persisted = loadBindings();
+        if (persisted.length > 0) {
+          // Try to bind the first persisted session that's still active in daemon
+          for (const sid of persisted) {
+            const s = getSessionById(sid);
+            if (s && s.is_active === 1) {
+              setSessionId(sid);
+              boundTransports.add(transport.sessionId);
+              log.info(`Auto-bound reconnected session ${sid} (${s.friendly_name}) to transport ${transport.sessionId}`);
+              break;
+            }
+          }
+        }
       } else if (req.url === "/bind" && req.method === "POST") {
         // The session-start hook calls this to bind a CC session_id to the
         // most recently connected (unbound) MCP transport. This completes
