@@ -7,7 +7,11 @@ import type { BridgeRegistry } from "./types.js";
 
 const log = createLogger("bridge");
 
-const DEFAULT_BRIDGE_HOST = "127.0.0.1";
+/** Normalize loopback variants to a single canonical IP. */
+export function normalizeIp(ip: string | undefined): string {
+  if (!ip || ip === "::1" || ip === "0.0.0.0" || ip === "127.0.0.1") return "127.0.0.1";
+  return ip.replace(/^::ffff:/, "");
+}
 
 interface BridgeResponse {
   ok: boolean;
@@ -18,7 +22,6 @@ interface BridgeResponse {
 
 /**
  * Discover all active bridge instances by reading registry files.
- * Cleans up stale entries whose PIDs are dead.
  */
 function discoverBridges(): BridgeRegistry[] {
   try {
@@ -42,24 +45,8 @@ function discoverBridges(): BridgeRegistry[] {
       const data = JSON.parse(
         fs.readFileSync(filePath, "utf-8")
       ) as BridgeRegistry;
-
-      // Remote bridges can't be PID-checked -- just trust them
-      if (data.remote) {
-        bridges.push(data);
-      } else {
-        // Local bridge: check if the process is still alive
-        try {
-          process.kill(data.pid, 0);
-          bridges.push(data);
-        } catch {
-          // Expected: process exited, clean up its registry file
-          try {
-            fs.unlinkSync(filePath);
-          } catch {
-            // Expected: file may have been removed by another process
-          }
-        }
-      }
+      data.host = normalizeIp(data.host);
+      bridges.push(data);
     } catch {
       // Expected: corrupt or malformed bridge registry file, remove it
       try {
@@ -80,13 +67,13 @@ function sendToBridge(
   port: number,
   text: string,
   routing: { session_id?: string; pid?: number },
-  host?: string
+  host: string
 ): Promise<BridgeResponse | null> {
   return new Promise((resolve) => {
     const payload = JSON.stringify({ ...routing, text });
     const req = http.request(
       {
-        hostname: host || DEFAULT_BRIDGE_HOST,
+        hostname: host,
         port,
         path: "/send",
         method: "POST",
@@ -127,23 +114,19 @@ function sendToBridge(
 
 /**
  * Push a message to a terminal via any available bridge instance.
- * Accepts session_id or pid for routing.
  * Tries each discovered bridge until one succeeds.
+ * Prefers session_map matches over other methods.
  */
 export async function pushToTerminal(
   text: string,
   routing: { session_id?: string; pid?: number }
 ): Promise<BridgeResponse | null> {
   const bridges = discoverBridges();
-  if (bridges.length === 0) {
-    return null;
-  }
+  if (bridges.length === 0) return null;
 
   for (const bridge of bridges) {
     const result = await sendToBridge(bridge.port, text, routing, bridge.host);
-    if (result?.ok) {
-      return result;
-    }
+    if (result?.ok && result.method === "session_map") return result;
   }
 
   return { ok: false, error: `No bridge instance has a terminal for ${JSON.stringify(routing)}` };
@@ -157,38 +140,31 @@ export function isBridgeAvailable(): boolean {
 }
 
 /**
- * Notify the bridge on a specific IP about a session registration.
- * Only the bridge serving sessions from this IP gets notified.
- * No broadcasting -- direct routing by IP.
+ * Notify bridges on a specific IP about a session registration.
  */
 export function notifyBridge(targetIp: string, session: {
   session_id: string;
   friendly_name: string;
   cwd?: string;
   pid?: number;
+  terminal_pid?: number;
 }): void {
   const bridges = discoverBridges();
+  const normalizedTarget = normalizeIp(targetIp);
   const payload = JSON.stringify({
     session_id: session.session_id,
     friendly_name: session.friendly_name,
     cwd: session.cwd || "",
     pid: session.pid || null,
+    terminal_pid: session.terminal_pid || null,
   });
 
-  // Normalize: local requests (127.0.0.1, ::1) match local bridges (no host or 127.0.0.1 or 0.0.0.0)
-  const isLocal = targetIp === "127.0.0.1" || targetIp === "::1" || targetIp === "0.0.0.0";
-
   for (const bridge of bridges) {
-    const bridgeIsLocal = !bridge.host || bridge.host === "127.0.0.1" || bridge.host === "0.0.0.0";
-    const bridgeIp = bridge.host || "127.0.0.1";
-
-    // Match: local session -> local bridges, remote session -> bridge on same IP
-    const matches = isLocal ? bridgeIsLocal : bridgeIp === targetIp;
-    if (!matches) continue;
+    if (bridge.host !== normalizedTarget) continue;
 
     const req = http.request(
       {
-        hostname: bridgeIp === "0.0.0.0" ? "127.0.0.1" : bridgeIp,
+        hostname: bridge.host,
         port: bridge.port,
         path: "/notify",
         method: "POST",
@@ -213,8 +189,8 @@ export function notifyBridge(targetIp: string, session: {
 }
 
 /**
- * Push a message to a specific IP's bridge.
- * Used for targeted delivery when we know the session's source IP.
+ * Push a message to a session's bridge by IP.
+ * Prefers session_map matches, falls back to any successful delivery.
  */
 export async function pushToSessionBridge(
   targetIp: string,
@@ -222,17 +198,12 @@ export async function pushToSessionBridge(
   routing: { session_id?: string; pid?: number }
 ): Promise<BridgeResponse | null> {
   const bridges = discoverBridges();
-  const isLocal = targetIp === "127.0.0.1" || targetIp === "::1" || targetIp === "0.0.0.0";
-
+  const normalizedTarget = normalizeIp(targetIp);
   for (const bridge of bridges) {
-    const bridgeIsLocal = !bridge.host || bridge.host === "127.0.0.1" || bridge.host === "0.0.0.0";
-    const bridgeIp = bridge.host || "127.0.0.1";
-    const matches = isLocal ? bridgeIsLocal : bridgeIp === targetIp;
-    if (!matches) continue;
+    if (bridge.host !== normalizedTarget) continue;
 
-    const result = await sendToBridge(bridge.port, text, routing,
-      bridgeIp === "0.0.0.0" ? "127.0.0.1" : bridgeIp);
-    if (result?.ok) return result;
+    const result = await sendToBridge(bridge.port, text, routing, bridge.host);
+    if (result?.ok && result.method === "session_map") return result;
   }
 
   // Fallback: try all bridges (in case source_ip isn't set yet)

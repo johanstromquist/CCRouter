@@ -38,7 +38,7 @@ export const POLL_INTERVAL = parseInt(
   10
 );
 export const INACTIVITY_TIMEOUT = 60 * 60 * 1000; // 60 minutes
-export const REMOTE_HEARTBEAT_TIMEOUT = 10 * 60 * 1000; // 10 minutes
+export const BRIDGE_HEARTBEAT_TIMEOUT = 60 * 60 * 1000; // 60 minutes
 export const BRIDGE_TIMEOUT = 3000;
 export const ACK_TIMEOUT_SECONDS = 30;
 export const MAX_RETRIES = 2;

@@ -157,18 +157,16 @@ server.tool(
   async () => {
     const serverIp = ADVERTISE_IP || "127.0.0.1";
     const daemonUrl = `http://${serverIp}:${DAEMON_PORT}`;
-    const extensionUrl = `http://${serverIp}:${SSE_PORT}/extension`;
+    const baseUrl = `http://${serverIp}:${SSE_PORT}`;
 
     const instructions = [
       "To complete CCRouter setup, run these commands:",
       "",
       "1. Download and install the Cursor extension:",
-      `   curl -o ccrouter-bridge.vsix ${extensionUrl}`,
+      `   curl -o ccrouter-bridge.vsix ${baseUrl}/extension`,
       `   cursor --install-extension ccrouter-bridge.vsix`,
       "",
       "2. Configure the extension to connect to the daemon:",
-      `   Write this JSON to ~/.ccrouter/config.json:`,
-      `   {"daemonUrl": "${daemonUrl}"}`,
       "",
       "   On Mac/Linux:",
       `   mkdir -p ~/.ccrouter && echo '{"daemonUrl":"${daemonUrl}"}' > ~/.ccrouter/config.json`,
@@ -176,9 +174,37 @@ server.tool(
       "   On Windows (PowerShell):",
       `   New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\\.ccrouter" | Out-Null; '{"daemonUrl":"${daemonUrl}"}' | Set-Content "$env:USERPROFILE\\.ccrouter\\config.json"`,
       "",
-      "3. Reload Cursor (Ctrl+Shift+P > Reload Window)",
+      "3. Download hooks:",
       "",
-      "4. Call register_self with your session_id",
+      "   On Mac/Linux:",
+      `   mkdir -p ~/.ccrouter/app/hooks`,
+      `   for h in session-start.sh session-end.sh ccrouter-inject-session.sh ack-message.sh; do`,
+      `     curl -o ~/.ccrouter/app/hooks/$h ${baseUrl}/hooks/$h && chmod +x ~/.ccrouter/app/hooks/$h`,
+      `   done`,
+      "",
+      "   On Windows (PowerShell):",
+      `   New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\\.ccrouter\\app\\hooks" | Out-Null`,
+      `   foreach ($h in @('session-start.ps1','session-end.ps1','ccrouter-inject-session.ps1','ack-message.ps1')) {`,
+      `     Invoke-WebRequest -Uri "${baseUrl}/hooks/$h" -OutFile "$env:USERPROFILE\\.ccrouter\\app\\hooks\\$h"`,
+      `   }`,
+      "",
+      "4. Configure hooks in Claude Code settings (~/.claude/settings.json):",
+      "",
+      "   On Mac/Linux:",
+      `   SessionStart:  {"type":"command","command":"~/.ccrouter/app/hooks/session-start.sh"}`,
+      `   SessionEnd:    {"type":"command","command":"~/.ccrouter/app/hooks/session-end.sh"}`,
+      `   PreToolUse (matcher mcp__ccrouter__.*): {"type":"command","command":"~/.ccrouter/app/hooks/ccrouter-inject-session.sh"}`,
+      `   UserPromptSubmit: {"type":"command","command":"~/.ccrouter/app/hooks/ack-message.sh","async":true}`,
+      "",
+      "   On Windows (PowerShell commands in hooks):",
+      `   SessionStart:  {"type":"command","command":"powershell -ExecutionPolicy Bypass -File %USERPROFILE%\\\\.ccrouter\\\\app\\\\hooks\\\\session-start.ps1"}`,
+      `   SessionEnd:    {"type":"command","command":"powershell -ExecutionPolicy Bypass -File %USERPROFILE%\\\\.ccrouter\\\\app\\\\hooks\\\\session-end.ps1"}`,
+      `   PreToolUse (matcher mcp__ccrouter__.*): {"type":"command","command":"powershell -ExecutionPolicy Bypass -File %USERPROFILE%\\\\.ccrouter\\\\app\\\\hooks\\\\ccrouter-inject-session.ps1"}`,
+      `   UserPromptSubmit: {"type":"command","command":"powershell -ExecutionPolicy Bypass -File %USERPROFILE%\\\\.ccrouter\\\\app\\\\hooks\\\\ack-message.ps1","async":true}`,
+      "",
+      "5. Reload Cursor (Ctrl+Shift+P > Reload Window)",
+      "",
+      "6. Start a new session -- the hooks will auto-register you.",
       "",
       "After setup, other sessions can push messages directly to your terminal.",
     ].join("\n");
@@ -927,6 +953,36 @@ async function main() {
         } else {
           res.writeHead(404);
           res.end("Extension VSIX not found on server");
+        }
+      } else if (req.url?.startsWith("/hooks/") && req.method === "GET") {
+        // Serve hook files for remote installation
+        const hookName = req.url.slice("/hooks/".length);
+        if (!/^[a-zA-Z0-9._-]+$/.test(hookName)) {
+          res.writeHead(400);
+          res.end("Invalid hook name");
+          return;
+        }
+        const hookPaths = [
+          path.join(__dirname, "..", "hooks", hookName),
+          path.join(__dirname, "..", "..", "hooks", hookName),
+          path.join(process.env.HOME || "", ".ccrouter", "app", "hooks", hookName),
+        ];
+        let hookPath: string | null = null;
+        for (const p of hookPaths) {
+          try { fs.statSync(p); hookPath = p; break; } catch {
+            // Expected: hook not at this path, try next
+          }
+        }
+        if (hookPath) {
+          const data = fs.readFileSync(hookPath);
+          res.writeHead(200, {
+            "Content-Type": "text/plain",
+            "Content-Length": data.length,
+          });
+          res.end(data);
+        } else {
+          res.writeHead(404);
+          res.end(`Hook "${hookName}" not found on server`);
         }
       } else if (req.url === "/health" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });

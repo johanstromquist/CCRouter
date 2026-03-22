@@ -17,13 +17,13 @@ import {
   cleanupOldAcks,
   resolveSession,
 } from "./db.js";
-import { pushToTerminal, pushToSessionBridge, notifyBridge } from "./bridge.js";
-import { scanLockFiles, isProcessAlive } from "./lock-scanner.js";
+import { pushToTerminal, pushToSessionBridge, notifyBridge, normalizeIp } from "./bridge.js";
+import { scanLockFiles } from "./lock-scanner.js";
 import { createLogger } from "./logger.js";
 import {
   DAEMON_PORT,
   POLL_INTERVAL,
-  REMOTE_HEARTBEAT_TIMEOUT,
+  BRIDGE_HEARTBEAT_TIMEOUT,
   BIND_HOST,
   ACK_TIMEOUT_SECONDS,
   BRIDGES_DIR,
@@ -57,9 +57,7 @@ async function handleRegister(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  // Capture source IP -- used to route push delivery to the correct bridge.
-  // Every machine is just an IP. No local vs remote distinction.
-  const sourceIp = (req.socket.remoteAddress || "127.0.0.1").replace(/^::ffff:/, "");
+  const sourceIp = normalizeIp((req.socket.remoteAddress || "127.0.0.1").replace(/^::ffff:/, ""));
 
   const session = registerSession(body);
 
@@ -74,6 +72,7 @@ async function handleRegister(req: IncomingMessage, res: ServerResponse) {
     friendly_name: session.friendly_name,
     cwd: session.cwd || body.cwd,
     pid: session.pid || body.pid,
+    terminal_pid: session.terminal_pid || body.terminal_pid,
   });
 
   json(res, 200, {
@@ -126,31 +125,28 @@ async function handleRegisterBridge(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  // Write a bridge registry file so bridge.ts can discover this remote bridge
+  const sourceIp = normalizeIp((req.socket.remoteAddress || "127.0.0.1").replace(/^::ffff:/, ""));
+
   fs.mkdirSync(BRIDGES_DIR, { recursive: true });
 
-  // Clean up old bridge files for this host (port may have changed on restart)
-  try {
-    const files = fs.readdirSync(BRIDGES_DIR).filter((f: string) => f.startsWith(`remote-${body.host}-`));
-    for (const f of files) {
-      try { fs.unlinkSync(path.join(BRIDGES_DIR, f)); } catch {}
-    }
-  } catch {}
-
-  const registryFile = path.join(BRIDGES_DIR, `remote-${body.host}-${body.port}.json`);
+  const registryFile = path.join(BRIDGES_DIR, `${sourceIp}-${body.port}.json`);
   fs.writeFileSync(
     registryFile,
     JSON.stringify({
       port: body.port,
-      host: body.host,
+      host: sourceIp,
       pid: body.pid || 0,
-      remote: true,
       started: Date.now(),
     })
   );
 
-  log.info(`Remote bridge registered: ${body.host}:${body.port}`);
-  json(res, 200, { ok: true, registered: `${body.host}:${body.port}` });
+  // Bridge heartbeat keeps sessions alive
+  const db = getDb();
+  db.prepare(
+    "UPDATE sessions SET last_seen_at = ? WHERE source_ip = ? AND is_active = 1"
+  ).run(new Date().toISOString(), sourceIp);
+
+  json(res, 200, { ok: true, registered: `${sourceIp}:${body.port}` });
 }
 
 function handleSessionInfo(sessionId: string, res: ServerResponse) {
@@ -170,12 +166,8 @@ function cleanupStaleSessions() {
 
   for (const session of sessions) {
     const lastSeen = session.last_seen_at ? new Date(session.last_seen_at).getTime() : 0;
-    const idleMinutes = Math.round((now - lastSeen) / 60_000);
-
-    // Heartbeat timeout only. No PID checks -- remote sessions have PIDs
-    // from other machines that appear "dead" locally, causing false deactivation.
-    // Active sessions get touchSession() on every MCP tool call, keeping them alive.
-    if (lastSeen && now - lastSeen > REMOTE_HEARTBEAT_TIMEOUT) {
+    if (lastSeen && now - lastSeen > BRIDGE_HEARTBEAT_TIMEOUT) {
+      const idleMinutes = Math.round((now - lastSeen) / 60_000);
       log.info(`Deactivating "${session.friendly_name}" -- no heartbeat for ${idleMinutes} minutes`);
       markSessionInactive(session.session_id);
     }

@@ -56,7 +56,7 @@ settings['hooks']['SessionStart'] = [{
     'matcher': '*',
     'hooks': [{
         'type': 'command',
-        'command': '$CCROUTER_DIR/hooks/session-start.sh'
+        'command': '$APP_DIR/hooks/session-start.sh'
     }]
 }]
 
@@ -64,21 +64,21 @@ settings['hooks']['SessionEnd'] = [{
     'matcher': '*',
     'hooks': [{
         'type': 'command',
-        'command': '$CCROUTER_DIR/hooks/session-end.sh'
+        'command': '$APP_DIR/hooks/session-end.sh'
     }]
 }]
 
 settings['hooks']['UserPromptSubmit'] = [{
     'hooks': [{
         'type': 'command',
-        'command': '$CCROUTER_DIR/hooks/ack-message.sh',
+        'command': '$APP_DIR/hooks/ack-message.sh',
         'async': True
     }]
 }]
 
 settings['statusLine'] = {
     'type': 'command',
-    'command': '$CCROUTER_DIR/hooks/statusline.sh'
+    'command': '$APP_DIR/hooks/statusline.sh'
 }
 
 with open('$SETTINGS_JSON', 'w') as f:
@@ -99,16 +99,14 @@ mkdir -p "$HOME/.ccrouter/logs"
 
 # Copy dist files
 cp "$CCROUTER_DIR"/dist/*.js "$APP_DIR/dist/"
-cp "$CCROUTER_DIR"/dist/*.js "$APP_DIR/"
 
 # Copy data files (name generator)
 cp "$CCROUTER_DIR"/data/*.json "$HOME/.ccrouter/data/"
 
-# Copy hooks
-cp "$CCROUTER_DIR/hooks/statusline.sh" "$APP_DIR/hooks/statusline.sh"
-cp "$CCROUTER_DIR/hooks/ack-message.sh" "$APP_DIR/hooks/ack-message.sh"
-chmod +x "$APP_DIR/hooks/statusline.sh"
-chmod +x "$APP_DIR/hooks/ack-message.sh"
+# Copy hooks (all .sh and .ps1 files)
+cp "$CCROUTER_DIR"/hooks/*.sh "$APP_DIR/hooks/" 2>/dev/null || true
+cp "$CCROUTER_DIR"/hooks/*.ps1 "$APP_DIR/hooks/" 2>/dev/null || true
+chmod +x "$APP_DIR"/hooks/*.sh 2>/dev/null || true
 
 # Copy node_modules for SSE server (needs @modelcontextprotocol/sdk)
 if [ -d "$CCROUTER_DIR/node_modules" ]; then

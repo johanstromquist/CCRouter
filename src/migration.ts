@@ -81,6 +81,13 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    description: "Add terminal_pid column to sessions",
+    up: (db) => {
+      db.exec(`ALTER TABLE sessions ADD COLUMN terminal_pid INTEGER`);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

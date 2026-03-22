@@ -2,6 +2,7 @@ export interface Session {
   session_id: string;
   friendly_name: string;
   pid: number | null;
+  terminal_pid: number | null; // PID of the terminal shell (for direct matching in bridge)
   cwd: string | null;
   workspace_folders: string | null; // JSON array
   ide_name: string | null;
@@ -20,8 +21,7 @@ export function isSessionActive(s: Session): boolean {
 export interface BridgeRegistry {
   port: number;
   pid: number;
-  host?: string;
-  remote?: boolean;
+  host: string;
   platform?: string;
   started: number;
 }
@@ -53,6 +53,7 @@ export interface ChannelInvite {
 export interface RegisterRequest {
   session_id: string;
   pid?: number;
+  terminal_pid?: number;
   cwd?: string;
   desired_name?: string;
   workspace_folders?: string[];

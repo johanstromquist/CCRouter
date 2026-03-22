@@ -47,16 +47,13 @@ function activate(context) {
       req.on("data", (chunk) => (body += chunk));
       req.on("end", async () => {
         try {
-          const { session_id, friendly_name, cwd, pid } =
+          const { session_id, friendly_name, cwd, pid, terminal_pid } =
             JSON.parse(body);
 
-          if (session_id) {
-            // Only map if PID matching confirms this session is in THIS
-            // bridge's Cursor window. No fallback -- without PID match,
-            // other bridges would also claim the session.
-            const terminalPid = await findTerminalPidForSession(pid);
-            if (terminalPid) {
-              sessionTerminalMap.set(session_id, terminalPid);
+          if (session_id && terminal_pid) {
+            const terminal = await findTerminalByProcessId(terminal_pid);
+            if (terminal) {
+              sessionTerminalMap.set(session_id, terminal_pid);
               persistSession(cwd, session_id, friendly_name);
             }
           }
@@ -98,20 +95,21 @@ function activate(context) {
       `CCRouter Terminal Bridge listening on ${bridgeHost}:${port} (${process.platform})`
     );
 
-    // Write local registry file
-    registryFile = path.join(BRIDGES_DIR, `${port}.json`);
+    // Write registry file (normalize 0.0.0.0 to 127.0.0.1 for routing)
+    const registryHost = bridgeHost === "0.0.0.0" ? "127.0.0.1" : bridgeHost;
+    registryFile = path.join(BRIDGES_DIR, `${registryHost}-${port}.json`);
     fs.writeFileSync(
       registryFile,
       JSON.stringify({
         port,
         pid: process.pid,
-        host: bridgeHost,
+        host: registryHost,
         platform: process.platform,
         started: Date.now(),
       })
     );
 
-    // Register with remote daemon if configured
+    // Heartbeat to daemon
     registerWithDaemon(port);
   });
 
@@ -161,10 +159,8 @@ function registerWithDaemon(port) {
   if (!daemonUrl) {
     daemonUrl = vscode.workspace
       .getConfiguration("ccrouter")
-      .get("daemonUrl", "");
+      .get("daemonUrl", "http://127.0.0.1:19919");
   }
-
-  if (!daemonUrl) return;
 
   // Determine this machine's IP
   const os = require("os");
@@ -216,55 +212,6 @@ function registerWithDaemon(port) {
   req.end();
 }
 
-// Find which terminal a session's process belongs to.
-// Returns the terminal's processId if found.
-async function findTerminalPidForSession(sessionPid) {
-  if (!sessionPid) return null;
-
-  for (const terminal of vscode.window.terminals) {
-    const termPid = await terminal.processId;
-    if (!termPid) continue;
-
-    // Direct PID match (session is the shell itself, unlikely but possible)
-    if (termPid === sessionPid) return termPid;
-
-    // Check if session PID is a descendant of the terminal's shell
-    if (isDescendant(termPid, sessionPid)) return termPid;
-  }
-
-  return null;
-}
-
-// Check if childPid is a descendant of parentPid
-function isDescendant(parentPid, childPid) {
-  try {
-    if (IS_WINDOWS) {
-      // Windows: walk entire process tree in a single PowerShell call
-      const result = execSync(
-        `powershell -NoProfile -Command "$p=${childPid}; for($i=0;$i -lt 10;$i++){$o=Get-CimInstance Win32_Process -Filter \\"ProcessId=$p\\" -ErrorAction SilentlyContinue; if(-not $o){break}; $p=$o.ParentProcessId; if($p -eq ${parentPid}){Write-Output 'FOUND'; break}; if($p -le 1){break}}; Write-Output 'DONE'"`,
-        { encoding: "utf-8", timeout: 5000 }
-      ).trim();
-      return result.includes("FOUND");
-    } else {
-      // Unix: walk up from child using ps
-      let currentPid = childPid;
-      for (let i = 0; i < 10; i++) {
-        const ppid = parseInt(
-          execSync(`ps -o ppid= -p ${currentPid}`, {
-            encoding: "utf-8",
-          }).trim(),
-          10
-        );
-        if (!ppid || ppid <= 1) return false;
-        if (ppid === parentPid) return true;
-        currentPid = ppid;
-      }
-    }
-  } catch {
-    // Expected: process may have exited during tree walk
-  }
-  return false;
-}
 
 // Unified send: accepts {session_id, text} or {pid, text}
 async function sendToTerminal(data) {
@@ -272,18 +219,11 @@ async function sendToTerminal(data) {
   let terminal = null;
   let method = "";
 
-  // Find terminal by PID descendant check (session's PID is a child of the terminal's shell).
-  // This is the primary routing mechanism on Mac. On Windows, isDescendant
-  // uses PowerShell which may fail -- the fallback below handles that.
-  if (!terminal && pid) {
-    for (const t of vscode.window.terminals) {
-      const termPid = await t.processId;
-      if (termPid && isDescendant(termPid, pid)) {
-        terminal = t;
-        method = "pid_descendant";
-        break;
-      }
-    }
+  // Look up terminal via session_id -> terminal_pid map (populated by /notify)
+  if (session_id && sessionTerminalMap.has(session_id)) {
+    const termPid = sessionTerminalMap.get(session_id);
+    terminal = await findTerminalByProcessId(termPid);
+    if (terminal) method = "session_map";
   }
 
   if (!terminal) {

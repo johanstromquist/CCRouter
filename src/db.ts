@@ -23,6 +23,7 @@ export function getDb(): Database.Database {
 export function registerSession(opts: {
   session_id: string;
   pid?: number;
+  terminal_pid?: number;
   cwd?: string;
   desired_name?: string;
   workspace_folders?: string[];
@@ -46,6 +47,7 @@ export function registerSession(opts: {
     if (existing) {
       db.prepare(
         `UPDATE sessions SET is_active = 1, last_seen_at = ?, pid = COALESCE(?, pid),
+         terminal_pid = COALESCE(?, terminal_pid),
          cwd = COALESCE(?, cwd),
          workspace_folders = COALESCE(?, workspace_folders),
          ide_name = COALESCE(?, ide_name), lock_port = COALESCE(?, lock_port)
@@ -53,6 +55,7 @@ export function registerSession(opts: {
       ).run(
         now,
         opts.pid ?? null,
+        opts.terminal_pid ?? null,
         normalizedCwd ?? null,
         opts.workspace_folders ? JSON.stringify(opts.workspace_folders) : null,
         opts.ide_name ?? null,
@@ -72,12 +75,13 @@ export function registerSession(opts: {
     });
 
     db.prepare(
-      `INSERT INTO sessions (session_id, friendly_name, pid, cwd, workspace_folders, ide_name, lock_port, registered_at, last_seen_at, is_active, name_custom)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
+      `INSERT INTO sessions (session_id, friendly_name, pid, terminal_pid, cwd, workspace_folders, ide_name, lock_port, registered_at, last_seen_at, is_active, name_custom)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
     ).run(
       opts.session_id,
       friendlyName,
       opts.pid ?? null,
+      opts.terminal_pid ?? null,
       normalizedCwd ?? null,
       opts.workspace_folders ? JSON.stringify(opts.workspace_folders) : null,
       opts.ide_name ?? null,

@@ -32,14 +32,32 @@ if [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
+# Walk up from CC process to find the terminal shell PID.
+# The terminal shell is the process whose parent is Cursor/Code/Electron.
+TERMINAL_PID=""
+WALK_PID="$CC_PID"
+for i in $(seq 1 15); do
+  PARENT=$(ps -o ppid= -p "$WALK_PID" 2>/dev/null | tr -d ' ')
+  [ -z "$PARENT" ] || [ "$PARENT" -le 1 ] 2>/dev/null && break
+  PARENT_CMD=$(ps -o comm= -p "$PARENT" 2>/dev/null || echo "")
+  case "$PARENT_CMD" in
+    *Cursor*|*Code*|*Electron*)
+      TERMINAL_PID="$WALK_PID"
+      break
+      ;;
+  esac
+  WALK_PID="$PARENT"
+done
+
 # Build registration payload (using sys.argv to prevent code injection)
 PAYLOAD=$(python3 -c "
 import json, sys
 d = {'session_id': sys.argv[1]}
 if sys.argv[2]: d['cwd'] = sys.argv[2]
 if sys.argv[3]: d['pid'] = int(sys.argv[3]) if sys.argv[3].isdigit() else None
+if sys.argv[4]: d['terminal_pid'] = int(sys.argv[4]) if sys.argv[4].isdigit() else None
 print(json.dumps(d))
-" "$SESSION_ID" "$CWD" "$CC_PID" 2>/dev/null || echo "{\"session_id\":\"$SESSION_ID\"}")
+" "$SESSION_ID" "$CWD" "$CC_PID" "$TERMINAL_PID" 2>/dev/null || echo "{\"session_id\":\"$SESSION_ID\"}")
 
 # Register with daemon
 RESPONSE=$(curl -s -X POST "$DAEMON_URL/register" \
