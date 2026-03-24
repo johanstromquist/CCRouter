@@ -68,6 +68,11 @@ function activate(context) {
       const terminals = await getTerminalMap();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(terminals));
+    } else if (req.method === "GET" && req.url?.startsWith("/check/")) {
+      const sessionId = req.url.slice("/check/".length);
+      const mapped = sessionTerminalMap.has(sessionId);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, mapped }));
     } else if (req.method === "GET" && req.url === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(

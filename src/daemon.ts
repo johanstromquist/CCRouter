@@ -17,7 +17,7 @@ import {
   cleanupOldAcks,
   resolveSession,
 } from "./db.js";
-import { pushToTerminal, pushToSessionBridge, notifyBridge, normalizeIp } from "./bridge.js";
+import { pushToTerminal, pushToSessionBridge, notifyBridge, notifyBridgePort, probeBridge, normalizeIp } from "./bridge.js";
 import { scanLockFiles } from "./lock-scanner.js";
 import { createLogger } from "./logger.js";
 import {
@@ -31,6 +31,13 @@ import {
 import type { RegisterRequest, Session } from "./types.js";
 
 const log = createLogger("daemon");
+
+/** Track known bridge ports so we can detect new bridges (extension host restarts). */
+const knownBridges = new Set<string>();
+
+/** Cached bridge status per session_id. Updated by periodic probe. */
+const bridgeStatusCache = new Map<string, { status: string; ts: number }>();
+const BRIDGE_STATUS_TTL = 30_000; // 30s cache
 
 // --- HTTP helpers ---
 
@@ -130,6 +137,9 @@ async function handleRegisterBridge(req: IncomingMessage, res: ServerResponse) {
   fs.mkdirSync(BRIDGES_DIR, { recursive: true });
 
   const registryFile = path.join(BRIDGES_DIR, `${sourceIp}-${body.port}.json`);
+  const bridgeKey = `${sourceIp}:${body.port}`;
+  const isNew = !knownBridges.has(bridgeKey);
+  knownBridges.add(bridgeKey);
   fs.writeFileSync(
     registryFile,
     JSON.stringify({
@@ -146,16 +156,49 @@ async function handleRegisterBridge(req: IncomingMessage, res: ServerResponse) {
     "UPDATE sessions SET last_seen_at = ? WHERE source_ip = ? AND is_active = 1"
   ).run(new Date().toISOString(), sourceIp);
 
+  // New bridge: re-notify it about all active sessions on this IP so it can
+  // rebuild its sessionTerminalMap (handles extension host restarts gracefully)
+  if (isNew) {
+    const sessions = db.prepare(
+      "SELECT session_id, friendly_name, cwd, pid, terminal_pid FROM sessions WHERE source_ip = ? AND is_active = 1 AND terminal_pid IS NOT NULL"
+    ).all(sourceIp) as Array<{
+      session_id: string;
+      friendly_name: string;
+      cwd?: string;
+      pid?: number;
+      terminal_pid?: number;
+    }>;
+
+    if (sessions.length > 0) {
+      log.info(`New bridge ${sourceIp}:${body.port} -- re-notifying ${sessions.length} sessions`);
+      notifyBridgePort(sourceIp, body.port, sessions);
+    }
+  }
+
   json(res, 200, { ok: true, registered: `${sourceIp}:${body.port}` });
 }
 
-function handleSessionInfo(sessionId: string, res: ServerResponse) {
+async function handleSessionInfo(sessionId: string, res: ServerResponse) {
   const session = getSessionById(sessionId);
   if (!session) {
     json(res, 404, { error: "session not found" });
     return;
   }
-  json(res, 200, session);
+
+  // Bridge status: use cache if fresh, otherwise probe async and return stale/unknown
+  let bridgeStatus = "unknown";
+  const cached = bridgeStatusCache.get(sessionId);
+  if (cached && Date.now() - cached.ts < BRIDGE_STATUS_TTL) {
+    bridgeStatus = cached.status;
+  } else if (session.source_ip && session.is_active) {
+    // Probe in background, return cached or "unknown" for now
+    probeBridge(session.source_ip, sessionId).then((status) => {
+      bridgeStatusCache.set(sessionId, { status, ts: Date.now() });
+    });
+    bridgeStatus = cached?.status || "unknown";
+  }
+
+  json(res, 200, { ...session, bridge_status: bridgeStatus });
 }
 
 // --- Stale session cleanup ---

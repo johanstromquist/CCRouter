@@ -20,6 +20,7 @@ export function resolveSessionName(
     session_id: string;
     cwd?: string;
     desired_name?: string;
+    terminal_pid?: number;
   }
 ): { name: string; isCustom: boolean } {
   let friendlyName: string | null = null;
@@ -28,7 +29,26 @@ export function resolveSessionName(
   // Normalize Windows paths (backslash -> forward slash) so cwd matching works
   const normalizedCwd = opts.cwd?.replace(/\\/g, "/");
 
-  // 0. Desired name (highest priority -- hook read from persisted session file)
+  // 0. Terminal match (same terminal = same identity, survives /clear)
+  if (opts.terminal_pid) {
+    const predecessor = db
+      .prepare(
+        "SELECT * FROM sessions WHERE terminal_pid = ? AND session_id != ? ORDER BY last_seen_at DESC LIMIT 1"
+      )
+      .get(opts.terminal_pid, opts.session_id) as Session | undefined;
+
+    if (predecessor) {
+      friendlyName = predecessor.friendly_name;
+      nameIsCustom = !!predecessor.name_custom;
+      db.prepare("DELETE FROM sessions WHERE session_id = ?").run(predecessor.session_id);
+      log.debug(`Re-identified (terminal_pid match): transferring name "${friendlyName}"`, {
+        from: predecessor.session_id,
+        to: opts.session_id,
+      });
+    }
+  }
+
+  // 1. Desired name (hook read from persisted session file)
   if (opts.desired_name) {
     const activeTaken = db
       .prepare(
@@ -97,17 +117,13 @@ export function resolveSessionName(
 
       if (candidates.length === 1) {
         friendlyName = candidates[0].friendly_name;
+        nameIsCustom = !!candidates[0].name_custom;
         db.prepare("DELETE FROM sessions WHERE session_id = ?").run(
           candidates[0].session_id
         );
         log.debug(`Re-identified (cwd match, inactive): transferring name "${friendlyName}"`, {
           from: candidates[0].session_id,
           to: opts.session_id,
-        });
-      } else if (candidates.length > 1) {
-        log.debug(`Ambiguous cwd match, skipping re-identification`, {
-          cwd: normalizedCwd,
-          candidate_count: candidates.length,
         });
       }
     }

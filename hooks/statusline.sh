@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# CCRouter status line -- shows session name in Claude Code footer
+# CCRouter status line -- shows session name + bridge health dot in Claude Code footer
 # Reads session_id from stdin JSON (provided by CC to all hooks and statusline)
-# then queries the daemon HTTP API for the friendly name.
-# Platform-agnostic: no env vars, no shared files.
+# then queries the daemon HTTP API for the friendly name and bridge status.
 
 set -euo pipefail
 
@@ -26,10 +25,21 @@ if [ -f "$CONFIG_FILE" ]; then
   fi
 fi
 
-NAME=$(curl -s --connect-timeout 1 --max-time 2 "$DAEMON_URL/session/$SESSION_ID" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('friendly_name',''))" 2>/dev/null || echo "")
+# Fetch session info (includes bridge_status from daemon)
+SESSION_JSON=$(curl -s --connect-timeout 1 --max-time 2 "$DAEMON_URL/session/$SESSION_ID" 2>/dev/null || echo "")
 
-if [ -n "$NAME" ]; then
-  echo "$NAME | $TIMESTAMP"
-else
+NAME=$(echo "$SESSION_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('friendly_name',''))" 2>/dev/null || echo "")
+BRIDGE=$(echo "$SESSION_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('bridge_status','unknown'))" 2>/dev/null || echo "unknown")
+
+if [ -z "$NAME" ]; then
   echo "CCRouter: ? | $TIMESTAMP"
+  exit 0
 fi
+
+case "$BRIDGE" in
+  connected)  DOT="●" ;;
+  timeout)    DOT="◐" ;;
+  *)          DOT="○" ;;
+esac
+
+echo "$DOT $NAME | $TIMESTAMP"

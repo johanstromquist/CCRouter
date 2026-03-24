@@ -140,6 +140,51 @@ export function isBridgeAvailable(): boolean {
 }
 
 /**
+ * Send a /notify POST to a single bridge host:port.
+ */
+function sendNotify(host: string, port: number, payload: string): void {
+  const req = http.request(
+    {
+      hostname: host,
+      port,
+      path: "/notify",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      },
+      timeout: 5000,
+    },
+    () => {} // fire and forget
+  );
+  req.on("error", (err: Error) => {
+    log.warn("Notification failed", { port, error: err.message });
+  });
+  req.on("timeout", () => {
+    log.warn("Notification timed out", { port });
+    req.destroy();
+  });
+  req.write(payload);
+  req.end();
+}
+
+function sessionNotifyPayload(session: {
+  session_id: string;
+  friendly_name: string;
+  cwd?: string;
+  pid?: number;
+  terminal_pid?: number;
+}): string {
+  return JSON.stringify({
+    session_id: session.session_id,
+    friendly_name: session.friendly_name,
+    cwd: session.cwd || "",
+    pid: session.pid || null,
+    terminal_pid: session.terminal_pid || null,
+  });
+}
+
+/**
  * Notify bridges on a specific IP about a session registration.
  */
 export function notifyBridge(targetIp: string, session: {
@@ -151,41 +196,104 @@ export function notifyBridge(targetIp: string, session: {
 }): void {
   const bridges = discoverBridges();
   const normalizedTarget = normalizeIp(targetIp);
-  const payload = JSON.stringify({
-    session_id: session.session_id,
-    friendly_name: session.friendly_name,
-    cwd: session.cwd || "",
-    pid: session.pid || null,
-    terminal_pid: session.terminal_pid || null,
-  });
+  const payload = sessionNotifyPayload(session);
 
   for (const bridge of bridges) {
     if (bridge.host !== normalizedTarget) continue;
+    sendNotify(bridge.host, bridge.port, payload);
+  }
+}
 
+/**
+ * Notify a single bridge (by IP + port) about multiple sessions.
+ * Used to re-populate a bridge's sessionTerminalMap after it restarts.
+ */
+export function notifyBridgePort(targetIp: string, port: number, sessions: Array<{
+  session_id: string;
+  friendly_name: string;
+  cwd?: string;
+  pid?: number;
+  terminal_pid?: number;
+}>): void {
+  const host = normalizeIp(targetIp);
+  for (const session of sessions) {
+    sendNotify(host, port, sessionNotifyPayload(session));
+  }
+}
+
+/**
+ * Probe whether a session is routable via a bridge on the given IP.
+ * Uses lightweight GET /check/:session_id -- no terminal side-effects.
+ */
+export async function probeBridge(
+  targetIp: string,
+  sessionId: string
+): Promise<"connected" | "disconnected"> {
+  const bridges = discoverBridges();
+  const normalizedTarget = normalizeIp(targetIp);
+  for (const bridge of bridges) {
+    if (bridge.host !== normalizedTarget) continue;
+    const result = await checkBridge(bridge.host, bridge.port, sessionId);
+    if (result) return "connected";
+  }
+  return "disconnected";
+}
+
+function checkBridge(host: string, port: number, sessionId: string): Promise<boolean> {
+  return new Promise((resolve) => {
     const req = http.request(
       {
-        hostname: bridge.host,
-        port: bridge.port,
-        path: "/notify",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(payload),
-        },
+        hostname: host,
+        port,
+        path: `/check/${sessionId}`,
+        method: "GET",
         timeout: 2000,
       },
-      () => {} // fire and forget
+      (res) => {
+        let body = "";
+        res.on("data", (chunk: Buffer) => (body += chunk));
+        res.on("end", () => {
+          try {
+            const data = JSON.parse(body);
+            if (data.error === "not found") {
+              // Old extension without /check -- fall back to /health sessions > 0
+              checkBridgeHealth(host, port).then(resolve);
+              return;
+            }
+            resolve(data.ok && data.mapped);
+          } catch {
+            resolve(false);
+          }
+        });
+      }
     );
-    req.on("error", (err: Error) => {
-      log.warn("Notification failed", { port: bridge.port, error: err.message });
-    });
-    req.on("timeout", () => {
-      log.warn("Notification timed out", { port: bridge.port });
-      req.destroy();
-    });
-    req.write(payload);
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
     req.end();
-  }
+  });
+}
+
+function checkBridgeHealth(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.request(
+      { hostname: host, port, path: "/health", method: "GET", timeout: 2000 },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk: Buffer) => (body += chunk));
+        res.on("end", () => {
+          try {
+            const data = JSON.parse(body);
+            resolve(data.ok && data.sessions > 0);
+          } catch {
+            resolve(false);
+          }
+        });
+      }
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.end();
+  });
 }
 
 /**

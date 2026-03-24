@@ -72,6 +72,7 @@ export function registerSession(opts: {
       session_id: opts.session_id,
       cwd: normalizedCwd,
       desired_name: opts.desired_name,
+      terminal_pid: opts.terminal_pid,
     });
 
     db.prepare(
